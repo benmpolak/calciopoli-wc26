@@ -224,29 +224,6 @@ function buildDemoState() {
   s.lastSync = new Date().toISOString();
   return s;
 }
-const INVITE_TEXT = `⚽ THE LEAGUE — WORLD CUNT 2026 ⚽
-A Calciopoli Production
-
-1. Open: https://benmpolak.github.io/calciopoli-wc26/
-2. It'll ask who you are — pick your own name. No imposters, Moggi is watching.
-3. Draft happens live in The Console — snake order, 15 players each, every player from all 48 World Cup squads.
-
-Weekly starting XIs. Waiver swaps from the Trough (bottom of the table feeds first). Trades. Head-to-head every gameweek. Loser gets relegated to Serie B.
-
-Rules are on the Rules tab. The phones are not tapped. Allegedly.`;
-
-async function shareInvite() {
-  if (navigator.share) {
-    try { await navigator.share({ text: INVITE_TEXT }); return; } catch { /* cancelled */ }
-  }
-  try {
-    await navigator.clipboard.writeText(INVITE_TEXT);
-    toast('Invite copied — paste it into Calciopoli');
-  } catch {
-    prompt('Copy this and send it to the lads:', INVITE_TEXT);
-  }
-}
-
 function enterDemo() {
   if (demoMode) return;
   demoBackup = state;
@@ -790,7 +767,6 @@ function viewSetup() {
       <div class="setup-total" id="setupTotal"></div>
     </div>
     <button class="btn" id="startDraft" style="padding:14px;font-size:16px">Randomise order &amp; start the draft</button>
-    <button class="btn ghost" id="inviteBtn">&#128172; Invite the lads (WhatsApp-ready)</button>
     <button class="btn ghost" id="demoBtn">Have a look around first — demo a finished season</button>
   </div>`;
 }
@@ -810,7 +786,6 @@ function bindSetup() {
   });
   $('#maxCountry').oninput = e => { state.settings.maxPerCountry = Math.max(1, +e.target.value || 3); };
   updateTotal();
-  $('#inviteBtn').onclick = shareInvite;
   $('#demoBtn').onclick = enterDemo;
   $('#startDraft').onclick = () => {
     state.managers.forEach((m, i) => { if (!m.name.trim()) m.name = `Manager ${i + 1}`; });
@@ -1368,7 +1343,6 @@ function viewSettings() {
     <div class="card">
       <h2>League admin</h2>
       <div style="display:flex;flex-direction:column;gap:10px">
-        <button class="btn ghost" id="inviteBtn2">&#128172; Invite the lads (WhatsApp-ready)</button>
         <button class="btn ghost" id="demoBtn2">Demo mode — preview with fake results</button>
         <button class="btn ghost" id="exportBtn">Export league file (backup)</button>
         <label class="btn ghost" style="text-align:center;cursor:pointer">Import league file<input type="file" id="importFile" accept=".json" style="display:none"></label>
@@ -1409,7 +1383,6 @@ function bindSettings() {
     pushShared(`settings/scoring/${inp.dataset.score}`, state.settings.scoring[inp.dataset.score]);
     save(); toast('Scoring updated');
   });
-  $('#inviteBtn2').onclick = shareInvite;
   $('#demoBtn2').onclick = enterDemo;
   $('#exportBtn').onclick = () => {
     const blob = new Blob([JSON.stringify(state, null, 1)], { type: 'application/json' });
