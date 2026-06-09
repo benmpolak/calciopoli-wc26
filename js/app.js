@@ -40,6 +40,35 @@ const MOGGI_QUOTES = [
 ];
 const moggiSays = () => `Moggi: “${MOGGI_QUOTES[Math.floor(Math.random() * MOGGI_QUOTES.length)]}”`;
 
+// live wiretap feed for The Console — one per pick, name of whoever's on the clock
+const INTERCEPTS = [
+  'Listen carefully, {name}. The player you want… he is already yours. I made the call an hour ago.',
+  '{name}, my friend. The other three suspect nothing.',
+  'Tell {name} the medical was passed. We did not look too closely.',
+  '{name} hesitates. Weakness. In my day we drafted by fax and fear.',
+  'The scouts recommended a defender. I recommended ignoring the scouts. {name} understands.',
+  'If {name} picks another goalkeeper, the federation will have questions.',
+  'The room is clean, {name}. I swept it myself. Twice.',
+  '{name} is on the clock. The clock, naturally, reports to me.',
+  'Whatever {name} selects, write down that it was always the plan.',
+  'Remind {name}: a snake draft has two ends, and I have friends at both.',
+];
+const interceptFor = (n, name) =>
+  INTERCEPTS[n % INTERCEPTS.length].replaceAll('{name}', name);
+
+// periodic findings from the committee, for the league table
+const INVESTIGATIONS = [
+  'Intercepted call, 02:41 — “{L} cannot keep getting away with this. Find out which referees they know.”',
+  'The committee notes {L}’s points total “with interest”. {B} has been offered Serie B and a plea deal.',
+  'Moggi’s verdict: “{L}? Talented. Connected. Probably both.” {B} has been reported to the authorities, who laughed.',
+  'Forensics found nothing on {L}’s phone. Forensics also found that {L} has two phones. {B} has been eliminated from enquiries — and from contention.',
+  'An anonymous source close to {L} says it’s all legitimate. The source sounded exactly like {L}.',
+];
+const investigationLine = (L, B) => {
+  const day = new Date().getDate();
+  return INVESTIGATIONS[day % INVESTIGATIONS.length].replaceAll('{L}', L).replaceAll('{B}', B);
+};
+
 /* ---------------- state ---------------- */
 let state = load() || freshState();
 
@@ -194,7 +223,7 @@ function matchPlayer(espnName, teamName) {
 
 async function syncNow(manual = false) {
   const btn = $('#syncBtn');
-  if (btn) { btn.disabled = true; btn.textContent = 'Syncing…'; }
+  if (btn) { btn.disabled = true; btn.textContent = 'Tapping…'; }
   try {
     const res = await fetch(`${ESPN_BASE}/scoreboard?dates=${TOURN_RANGE}&limit=400`);
     const data = await res.json();
@@ -227,7 +256,7 @@ async function syncNow(manual = false) {
     if (manual) toast('Sync failed — check connection');
   }
   const b2 = $('#syncBtn');
-  if (b2) { b2.disabled = false; b2.textContent = 'Sync'; }
+  if (b2) { b2.disabled = false; b2.textContent = '📞 Tap the lines'; }
 }
 
 async function processMatch(fx) {
@@ -280,7 +309,7 @@ async function processMatch(fx) {
 
 /* ---------------- views ---------------- */
 const NAV_ITEMS = [
-  ['draft', 'Draft Room'],
+  ['draft', 'The Console'],
   ['squads', 'Squads'],
   ['table', 'League Table'],
   ['fixtures', 'Fixtures'],
@@ -316,7 +345,7 @@ function renderSyncArea() {
   const el = $('#syncArea');
   if (state.phase !== 'season') { el.innerHTML = ''; return; }
   const last = state.lastSync ? new Date(state.lastSync).toLocaleString('en-GB', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }) : 'never';
-  el.innerHTML = `<span>Last sync: ${last}</span><button id="syncBtn" class="btn small">Sync</button>`;
+  el.innerHTML = `<span>Last intercept: ${last}</span><button id="syncBtn" class="btn small">&#128222; Tap the lines</button>`;
   $('#syncBtn').onclick = () => syncNow(true);
 }
 
@@ -392,6 +421,7 @@ function viewDraft() {
     <div>
       <div class="who">${esc(managerName(mid))} — you're on the clock</div>
       <div class="pick-meta">Pick ${n + 1} of ${totalPicks()} &middot; Round ${round} of ${state.settings.squadSize}</div>
+      <div class="intercept"><span class="rec"></span>LIVE INTERCEPT &mdash; &ldquo;${esc(interceptFor(n, managerName(mid)))}&rdquo;</div>
     </div>
     <div style="display:flex;gap:8px">
       <button class="btn ghost small" id="undoPick" ${n === 0 ? 'disabled' : ''}>Undo last</button>
@@ -557,7 +587,11 @@ function viewTable() {
   const allDrafted = state.draft.picks.map(pk => ({ pk, p: PLAYER_BY_ID[pk.playerId], pts: playerPoints(pk.playerId).pts }))
     .sort((a, b) => b.pts - a.pts).slice(0, 10);
   const hasPts = ranked.some(r => r.pts !== 0);
+  const investigation = hasPts
+    ? `<div class="card investigation"><span class="rec"></span><b>INVESTIGATION UPDATE</b> &mdash; ${esc(investigationLine(ranked[0].name, ranked[ranked.length - 1].name))}</div>`
+    : '';
   return `
+    ${investigation}
     ${ranked.map((m, i) => {
       const moggiTag = !hasPts ? '' :
         i === 0 ? '<span class="tag" title="Calciopoli, Article 6">&#128269; under investigation</span>' :
