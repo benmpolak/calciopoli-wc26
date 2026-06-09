@@ -107,9 +107,12 @@ const SYNC_OFF = new URLSearchParams(location.search).has('nosync');
 const WHO_KEY = 'wc26-whoami';
 let whoami = +localStorage.getItem(WHO_KEY) || null; // manager id, -1 = spectator
 let syncConnected = false;
+let demoMode = false;
+let demoBackup = null;
 const syncOn = () => !SYNC_OFF && !!window.WCSync;
+const netOn = () => syncOn() && !demoMode;
 const isCommissioner = () => whoami === state.managers[0]?.id;
-const canActFor = mid => !syncOn() || whoami === mid || isCommissioner();
+const canActFor = mid => demoMode || !syncOn() || whoami === mid || isCommissioner();
 
 const SHARED_KEYS = ['phase', 'managers', 'settings', 'draft', 'lineups', 'transfers', 'waivers', 'adjustments', 'playerMap'];
 function sharedSnapshot() {
@@ -118,15 +121,15 @@ function sharedSnapshot() {
   return o;
 }
 function pushShared(path, val) {
-  if (syncOn()) window.WCSync.set(path, val).catch(e => console.warn('[sync] write failed', e));
+  if (netOn()) window.WCSync.set(path, val).catch(e => console.warn('[sync] write failed', e));
 }
 function publishAll() {
-  if (syncOn()) window.WCSync.setRoot(sharedSnapshot()).catch(e => console.warn('[sync] publish failed', e));
+  if (netOn()) window.WCSync.setRoot(sharedSnapshot()).catch(e => console.warn('[sync] publish failed', e));
 }
 const toArr = x => Array.isArray(x) ? x : (x ? Object.values(x) : []);
 
 window.onSharedSnapshot = data => {
-  if (SYNC_OFF) return;
+  if (SYNC_OFF || demoMode) return;
   if (!data) {
     // cloud league is empty — publish if a game already started locally
     if (state.phase !== 'setup') publishAll();
@@ -178,7 +181,63 @@ function freshState() {
     view: 'draft',
   };
 }
-function save() { localStorage.setItem(LS_KEY, JSON.stringify(state)); }
+function save() { if (!demoMode) localStorage.setItem(LS_KEY, JSON.stringify(state)); }
+const rating = p => p.goals * 3 + p.caps;
+
+/* ---------------- demo mode ---------------- */
+function buildDemoState() {
+  const s = freshState();
+  s.phase = 'season';
+  s.view = 'team';
+  s.draft.order = [2, 4, 1, 3];
+  const sorted = [...PLAYERS].sort((a, b) => rating(b) - rating(a));
+  const taken = new Set();
+  const counts = {}, nations = {};
+  s.managers.forEach(m => { counts[m.id] = { GK: 0, DF: 0, MF: 0, FW: 0 }; nations[m.id] = {}; });
+  const q = s.settings.quotas, maxC = s.settings.maxPerCountry;
+  for (let n = 0; n < 60; n++) {
+    const m = 4, round = Math.floor(n / m), idx = n % m;
+    const mid = round % 2 === 0 ? s.draft.order[idx] : s.draft.order[m - 1 - idx];
+    const p = sorted.find(p => !taken.has(p.id) && counts[mid][p.pos] < q[p.pos] && (nations[mid][p.team] || 0) < maxC);
+    taken.add(p.id);
+    counts[mid][p.pos]++;
+    nations[mid][p.team] = (nations[mid][p.team] || 0) + 1;
+    s.draft.picks.push({ managerId: mid, playerId: p.id, n: n + 1 });
+  }
+  // fabricate Matchday 1 results for everyone drafted
+  const ps = {};
+  let seed = 42;
+  const rnd = () => (seed = (seed * 1103515245 + 12345) % 2147483648) / 2147483648;
+  for (const pk of s.draft.picks) {
+    const p = PLAYER_BY_ID[pk.playerId];
+    const started = rnd() < 0.8;
+    const goalChance = { FW: 0.35, MF: 0.2, DF: 0.07, GK: 0.005 }[p.pos];
+    ps[p.id] = {
+      st: started ? 1 : 0,
+      sub: started ? 0 : (rnd() < 0.6 ? 1 : 0),
+      g: rnd() < goalChance ? (rnd() < 0.2 ? 2 : 1) : 0,
+      a: rnd() < 0.18 ? 1 : 0,
+      cs: (p.pos === 'GK' || p.pos === 'DF') && rnd() < 0.4 ? 1 : 0,
+    };
+  }
+  s.matchStats = { demo1: { label: 'Demo — fictional Matchday 1', date: '2026-06-12T20:00Z', final: true, playerStats: ps } };
+  s.lastSync = new Date().toISOString();
+  return s;
+}
+function enterDemo() {
+  if (demoMode) return;
+  demoBackup = state;
+  demoMode = true;
+  state = buildDemoState();
+  render();
+  toast('Demo mode — fake draft, fake results. Your real league is untouched.');
+}
+function exitDemo() {
+  state = demoBackup || load() || freshState();
+  demoMode = false;
+  demoBackup = null;
+  render();
+}
 function load() {
   try {
     const s = JSON.parse(localStorage.getItem(LS_KEY));
@@ -280,7 +339,7 @@ function makePick(playerId) {
     }
     save(); render();
   };
-  if (syncOn()) {
+  if (netOn()) {
     const expected = pickNo();
     window.WCSync.txn('draft/picks', cur => {
       const arr = toArr(cur);
@@ -391,8 +450,7 @@ function gwManagerPoints(mid, gwIdx) {
 function managerPoints(mid) {
   let pts = 0;
   for (let i = 0; i < GAMEWEEKS.length; i++) {
-    if (!gwHasStarted(i) && !gwIsOver(i)) continue;
-    pts += gwManagerPoints(mid, i);
+    pts += gwManagerPoints(mid, i); // zero unless results exist in that window
   }
   const squadIds = new Set(managerSquad(mid).map(p => p.id));
   for (const [pid, adj] of Object.entries(state.adjustments)) {
@@ -404,8 +462,7 @@ function managerPoints(mid) {
 function contributedPoints(mid, pid) {
   let pts = 0;
   for (let i = 0; i < GAMEWEEKS.length; i++) {
-    if (!gwHasStarted(i) && !gwIsOver(i)) continue;
-    if (lineupFor(mid, i).includes(pid)) pts += gwPlayerPoints(pid, i);
+    if (effectiveXI(mid, i).xi.includes(pid)) pts += gwPlayerPoints(pid, i);
   }
   return pts + (state.adjustments[pid] || 0);
 }
@@ -435,7 +492,8 @@ function playerPoints(pid) {
 function gwStatus(i) {
   const synced = Object.values(state.matchStats).some(ev => inGw(ev.date, i));
   if (gwIsOver(i) && synced) return 'final';
-  if (gwHasStarted(i)) return synced ? 'live' : 'underway';
+  if (synced) return 'live';
+  if (gwHasStarted(i)) return 'underway';
   return 'upcoming';
 }
 function h2hStandings() {
@@ -482,6 +540,7 @@ let liveTimer = null;
 function anyMatchLive() { return state.fixtures.some(f => f.state === 'in'); }
 
 async function syncNow(manual = false) {
+  if (demoMode) { if (manual) toast('Demo mode — the results are fictional, like Moggi’s innocence'); return; }
   const btn = $('#syncBtn');
   if (btn) { btn.disabled = true; btn.textContent = 'Tapping…'; }
   try {
@@ -578,6 +637,7 @@ const NAV_ITEMS = [
   ['h2h', 'Head-to-Head'],
   ['table', 'League Table'],
   ['fixtures', 'Fixtures'],
+  ['rules', 'Rules'],
   ['settings', 'Settings'],
 ];
 
@@ -590,6 +650,17 @@ function render() {
 
   renderNav();
   renderSyncArea();
+  let bar = $('#demoBar');
+  if (demoMode && !bar) {
+    bar = document.createElement('div');
+    bar.id = 'demoBar';
+    bar.className = 'demo-bar';
+    bar.innerHTML = `<span class="rec"></span> DEMO — fake draft, fictional results. Your real league is untouched. <button class="btn small" id="demoExit">Exit demo</button>`;
+    document.body.appendChild(bar);
+    $('#demoExit').onclick = exitDemo;
+  } else if (!demoMode && bar) {
+    bar.remove();
+  }
   const main = $('#main');
   if (state.phase === 'setup') { main.innerHTML = viewSetup(); bindSetup(); return; }
   switch (state.view) {
@@ -598,6 +669,7 @@ function render() {
     case 'h2h': main.innerHTML = viewH2H(); break;
     case 'table': main.innerHTML = viewTable(); bindTable(); break;
     case 'fixtures': main.innerHTML = viewFixtures(); break;
+    case 'rules': main.innerHTML = viewRules(); break;
     case 'settings': main.innerHTML = viewSettings(); bindSettings(); break;
     default: state.view = 'draft'; render();
   }
@@ -613,7 +685,7 @@ function render() {
 
 function renderIdentity() {
   let ov = $('#whoOverlay');
-  const needed = syncOn() && state.phase !== 'setup' && !whoami;
+  const needed = netOn() && state.phase !== 'setup' && !whoami;
   if (!needed) { ov?.remove(); return; }
   if (ov) return;
   ov = document.createElement('div');
@@ -695,6 +767,7 @@ function viewSetup() {
       <div class="setup-total" id="setupTotal"></div>
     </div>
     <button class="btn" id="startDraft" style="padding:14px;font-size:16px">Randomise order &amp; start the draft</button>
+    <button class="btn ghost" id="demoBtn">Have a look around first — demo a finished season</button>
   </div>`;
 }
 function bindSetup() {
@@ -713,6 +786,7 @@ function bindSetup() {
   });
   $('#maxCountry').oninput = e => { state.settings.maxPerCountry = Math.max(1, +e.target.value || 3); };
   updateTotal();
+  $('#demoBtn').onclick = enterDemo;
   $('#startDraft').onclick = () => {
     state.managers.forEach((m, i) => { if (!m.name.trim()) m.name = `Manager ${i + 1}`; });
     if (state.settings.squadSize < 11) { toast('Squads need at least 11 for a starting XI'); return; }
@@ -726,7 +800,7 @@ function bindSetup() {
 }
 
 /* ----- the console (draft) ----- */
-let poolFilter = { q: '', team: '', pos: '', sort: 'caps', limit: 60 };
+let poolFilter = { q: '', team: '', pos: '', sort: 'rating', limit: 60 };
 
 function viewDraft() {
   if (state.phase === 'season') return viewDraftRecap();
@@ -816,7 +890,8 @@ function poolTable() {
   rows.sort((a, b) => s === 'name' ? a.name.localeCompare(b.name)
     : s === 'age' ? (a.age || 99) - (b.age || 99)
     : s === 'goals' ? b.goals - a.goals
-    : b.caps - a.caps);
+    : s === 'caps' ? b.caps - a.caps
+    : rating(b) - rating(a));
   const total = rows.length;
   rows = rows.slice(0, poolFilter.limit);
   return `
@@ -825,7 +900,8 @@ function poolTable() {
       <th data-sort="name">Player</th><th>Nation</th><th>Pos</th>
       <th class="num" data-sort="age">Age</th>
       <th class="num" data-sort="caps">Caps ${s === 'caps' ? '▾' : ''}</th>
-      <th class="num" data-sort="goals">Goals ${s === 'goals' ? '▾' : ''}</th><th></th>
+      <th class="num" data-sort="goals">Goals ${s === 'goals' ? '▾' : ''}</th>
+      <th class="num" data-sort="rating" title="Moggi's form guide: goals ×3 + caps">Rating ${s === 'rating' ? '▾' : ''}</th><th></th>
     </tr></thead>
     <tbody>
       ${rows.map(p => `
@@ -836,6 +912,7 @@ function poolTable() {
         <td class="num muted">${p.age ?? ''}</td>
         <td class="num">${p.caps}</td>
         <td class="num">${p.goals}</td>
+        <td class="num gold">${rating(p)}</td>
         <td><button class="btn small" data-pick="${p.id}" ${canPick(mid, p) && canActFor(mid) ? '' : `disabled title="${canActFor(mid) ? 'Position quota or country limit hit' : `${esc(managerName(mid))} is on the clock, not you`}"`}>Draft</button></td>
       </tr>`).join('')}
     </tbody>
@@ -851,8 +928,8 @@ function bindDraft() {
   $('#poolPos').onchange = e => { poolFilter.pos = e.target.value; poolFilter.limit = 60; refreshPool(); };
   bindPoolTable();
   $('#undoPick').onclick = () => {
-    if (syncOn() && !isCommissioner()) { toast('Only the commissioner can undo a pick'); return; }
-    if (syncOn()) {
+    if (netOn() && !isCommissioner()) { toast('Only the commissioner can undo a pick'); return; }
+    if (netOn()) {
       window.WCSync.txn('draft/picks', cur => { const a = toArr(cur); a.pop(); return a; })
         .then(res => { state.draft.picks = toArr(res.snapshot.val()); save(); render(); });
     } else {
@@ -1217,6 +1294,41 @@ function viewFixtures() {
     </div></div>`).join('');
 }
 
+/* ----- rules ----- */
+function viewRules() {
+  const sc = state.settings.scoring;
+  const q = state.settings.quotas;
+  return `
+  <div class="settings-grid">
+    <div class="card">
+      <h2>The basics</h2>
+      <p class="rules-p">Four managers. One snake draft over all ${PLAYERS.length} players from the 48 official FIFA squads — order reverses every round.</p>
+      <p class="rules-p">Squads of <b>${state.settings.squadSize}</b>: ${q.GK} GK, ${q.DF} DF, ${q.MF} MF, ${q.FW} FW. Maximum <b>${state.settings.maxPerCountry} players per country</b>.</p>
+      <h3>Gameweeks</h3>
+      ${GAMEWEEKS.map((g, i) => `<div class="score-row"><span>GW${g.n} — ${g.label}</span><span class="muted">${new Date(gwFrom(i)).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' })} – ${new Date(g.to).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' })}</span></div>`).join('')}
+    </div>
+    <div class="card">
+      <h2>Your team, every gameweek</h2>
+      <p class="rules-p"><b>Starting XI:</b> pick 11 from your 15 each gameweek — 1 GK, 3–5 DF, 2–5 MF, 1–3 FW. <b>Only starters score.</b></p>
+      <p class="rules-p"><b>Forgot to set it?</b> Last week's XI carries over (or a best XI is auto-picked). Nobody scores nil for being on holiday.</p>
+      <p class="rules-p"><b>Auto-subs:</b> if a starter doesn't play at all that gameweek, your best bench player who did play comes in automatically.</p>
+      <h3>Scoring</h3>
+      ${Object.keys(DEFAULT_SCORING).map(k => `<div class="score-row"><span>${SCORING_LABELS[k]}</span><b class="gold">${sc[k] > 0 ? '+' : ''}${sc[k]}</b></div>`).join('')}
+      <p class="muted" style="font-size:11.5px;margin-top:8px">Goals, assists, starts, subs, clean sheets. No captains. No bonus nonsense.</p>
+    </div>
+    <div class="card">
+      <h2>Head-to-head</h2>
+      <p class="rules-p">Each gameweek you face one rival — your starters' points vs theirs. <b>Win 3, draw 1, loss 0.</b> Pairings rotate so everyone plays everyone. Tiebreak: overall points.</p>
+      <h2 style="margin-top:18px">The Trough &amp; trades</h2>
+      <p class="rules-p"><b>Waiver draft:</b> every gameweek, one swap each from the Trough (all undrafted players). <b>Bottom of the table feeds first.</b> Pass if nothing tempts you.</p>
+      <p class="rules-p"><b>Trades:</b> player-for-player swaps between managers, any time, agreed in the group. Doesn't use your waiver turn.</p>
+      <h2 style="margin-top:18px">The small print</h2>
+      <p class="rules-p">Live scores from ESPN, synced automatically. The commissioner (${esc(managerName(state.managers[0]?.id))}) settles disputes, can act for absent managers, and adjusts points if the feed errs.</p>
+      <p class="rules-p muted" style="font-style:italic">All decisions are final. Especially the pre-arranged ones. — L. Moggi</p>
+    </div>
+  </div>`;
+}
+
 /* ----- settings ----- */
 function viewSettings() {
   const sc = state.settings.scoring;
@@ -1231,7 +1343,8 @@ function viewSettings() {
     <div class="card">
       <h2>League admin</h2>
       <div style="display:flex;flex-direction:column;gap:10px">
-        <button class="btn ghost" id="exportBtn">Export league file (share with the lads)</button>
+        <button class="btn ghost" id="demoBtn2">Demo mode — preview with fake results</button>
+        <button class="btn ghost" id="exportBtn">Export league file (backup)</button>
         <label class="btn ghost" style="text-align:center;cursor:pointer">Import league file<input type="file" id="importFile" accept=".json" style="display:none"></label>
         <button class="btn danger" id="resetBtn">Reset everything</button>
       </div>
@@ -1265,11 +1378,12 @@ function viewSettings() {
 }
 function bindSettings() {
   document.querySelectorAll('[data-score]').forEach(inp => inp.onchange = () => {
-    if (syncOn() && !isCommissioner()) { toast('Only the commissioner changes scoring'); render(); return; }
+    if (netOn() && !isCommissioner()) { toast('Only the commissioner changes scoring'); render(); return; }
     state.settings.scoring[inp.dataset.score] = +inp.value || 0;
     pushShared(`settings/scoring/${inp.dataset.score}`, state.settings.scoring[inp.dataset.score]);
     save(); toast('Scoring updated');
   });
+  $('#demoBtn2').onclick = enterDemo;
   $('#exportBtn').onclick = () => {
     const blob = new Blob([JSON.stringify(state, null, 1)], { type: 'application/json' });
     const a = document.createElement('a');
@@ -1288,21 +1402,21 @@ function bindSettings() {
         if (!imported.lineups) { imported.lineups = {}; imported.transfers = []; }
         if (!imported.waivers) imported.waivers = {};
         state = imported;
-        if (syncOn() && isCommissioner()) publishAll();
+        if (netOn() && isCommissioner()) publishAll();
         save(); render(); toast('League imported');
       } catch { toast('That file doesn’t look like a league export'); }
     });
   };
   $('#resetBtn').onclick = () => {
-    if (syncOn() && !isCommissioner()) { toast('Only the commissioner can reset the league'); return; }
+    if (netOn() && !isCommissioner()) { toast('Only the commissioner can reset the league'); return; }
     if (confirm('Wipe the league, draft and all scores — for EVERYONE?')) {
       state = freshState();
-      if (syncOn()) window.WCSync.setRoot(null);
+      if (netOn()) window.WCSync.setRoot(null);
       save(); render();
     }
   };
   $('#adjApply').onclick = () => {
-    if (syncOn() && !isCommissioner()) { toast('Only the commissioner adjusts points'); return; }
+    if (netOn() && !isCommissioner()) { toast('Only the commissioner adjusts points'); return; }
     const pid = +$('#adjPlayer').value, pts = +$('#adjPts').value || 0;
     if (!pid) return;
     state.adjustments[pid] = (state.adjustments[pid] || 0) + pts;
