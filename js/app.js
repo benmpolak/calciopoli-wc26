@@ -182,7 +182,8 @@ function freshState() {
   };
 }
 function save() { if (!demoMode) localStorage.setItem(LS_KEY, JSON.stringify(state)); }
-const rating = p => p.goals * 3 + p.caps;
+// projected fantasy points for the tournament (precomputed: team odds × start likelihood × scoring history)
+const rating = p => p.rating ?? (p.goals * 3 + p.caps);
 
 /* ---------------- demo mode ---------------- */
 function buildDemoState() {
@@ -926,7 +927,7 @@ function poolTable() {
       <th class="num" data-sort="age">Age</th>
       <th class="num" data-sort="caps">Caps ${s === 'caps' ? '▾' : ''}</th>
       <th class="num" data-sort="goals">Goals ${s === 'goals' ? '▾' : ''}</th>
-      <th class="num" data-sort="rating" title="Moggi's form guide: goals ×3 + caps">Rating ${s === 'rating' ? '▾' : ''}</th><th></th>
+      <th class="num" data-sort="rating" title="Projected points for the tournament — team strength (betting odds), how likely they are to start, scoring record">Proj. pts ${s === 'rating' ? '▾' : ''}</th><th></th>
     </tr></thead>
     <tbody>
       ${rows.map(p => `
@@ -1348,6 +1349,7 @@ function viewRules() {
       <p class="rules-p"><b>Waiver draft:</b> every gameweek, one swap each from the Trough (all undrafted players). <b>Bottom of the table feeds first.</b> Pass if nothing tempts you.</p>
       <p class="rules-p"><b>Trades:</b> player-for-player swaps between managers, any time, agreed in the group. Doesn't use your waiver turn.</p>
       <h2 style="margin-top:18px">The small print</h2>
+      <p class="rules-p"><b>Proj. pts</b> in the Console is each player's projected tournament points — how far the bookies think his nation goes, how likely he is to start, and his international scoring record. A guide, not a guarantee. Moggi accepts no liability.</p>
       <p class="rules-p">Live scores from ESPN, synced automatically. The commissioner (${esc(managerName(state.managers[0]?.id))}) settles disputes, can act for absent managers, and adjusts points if the feed errs.</p>
       <p class="rules-p muted" style="font-style:italic">All decisions are final. Especially the pre-arranged ones. — L. Moggi</p>
     </div>
