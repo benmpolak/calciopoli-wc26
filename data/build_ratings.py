@@ -67,10 +67,21 @@ for p in players:
         start_prob = 0.15
     if p['no'] and p['no'] <= 11:
         start_prob = min(0.92, start_prob + 0.06)
-    if p['age'] and p['age'] >= 36:
-        start_prob = max(0.10, start_prob - 0.08)
+    # age curve: career scoring rates flatter veterans; legs disagree
+    age = p['age'] or 27
+    if age >= 39:
+        form, start_pen = 0.55, 0.15
+    elif age >= 37:
+        form, start_pen = 0.70, 0.10
+    elif age >= 35:
+        form, start_pen = 0.82, 0.05
+    elif age >= 33:
+        form, start_pen = 0.92, 0.0
+    else:
+        form, start_pen = 1.0, 0.0
+    start_prob = max(0.10, start_prob - start_pen)
 
-    goal_rate = min(0.85, p['goals'] / max(p['caps'], 15)) * att_mult
+    goal_rate = min(0.85, p['goals'] / max(p['caps'], 15)) * att_mult * form
     assist_rate = 0.4 * goal_rate + {'GK': 0.0, 'DF': 0.02, 'MF': 0.05, 'FW': 0.05}[p['pos']]
     per_start = 2 + goal_rate * GOAL_PTS[p['pos']] + assist_rate * 3
     if p['pos'] in ('GK', 'DF'):
