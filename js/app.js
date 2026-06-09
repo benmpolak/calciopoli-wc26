@@ -372,13 +372,34 @@ function autoXI(squad) {
   return xi.map(p => p.id);
 }
 function lineupFor(mid, gwIdx) {
+  const squad = squadAt(mid, gwIdx);
+  const squadIds = new Set(squad.map(p => p.id));
   const stored = state.lineups[mid] || {};
-  if (stored[gwIdx]) return stored[gwIdx];
-  const squadIds = new Set(squadAt(mid, gwIdx).map(p => p.id));
-  for (let j = gwIdx - 1; j >= 0; j--) {
-    if (stored[j] && stored[j].every(id => squadIds.has(id))) return stored[j];
+  let xi = null;
+  if (stored[gwIdx]) xi = stored[gwIdx].filter(id => squadIds.has(id));
+  else {
+    for (let j = gwIdx - 1; j >= 0; j--) {
+      if (stored[j]) { xi = stored[j].filter(id => squadIds.has(id)); break; }
+    }
   }
-  return autoXI(squadAt(mid, gwIdx));
+  if (!xi) return autoXI(squad);
+  // top up short lineups (e.g. a starter left via waiver/trade) with best legal players
+  if (xi.length < XI_RULES.size) {
+    const cands = squad.filter(p => !xi.includes(p.id)).sort((a, b) => rating(b) - rating(a));
+    // satisfy position minimums first, then best available within maximums
+    for (const pos of ['GK', 'DF', 'MF', 'FW']) {
+      while (xi.length < XI_RULES.size && xiCounts(xi)[pos] < XI_RULES[pos][0]) {
+        const c = cands.find(p => p.pos === pos && !xi.includes(p.id));
+        if (!c) break;
+        xi.push(c.id);
+      }
+    }
+    for (const c of cands) {
+      if (xi.length >= XI_RULES.size) break;
+      if (!xi.includes(c.id) && xiCounts(xi)[c.pos] < XI_RULES[c.pos][1]) xi.push(c.id);
+    }
+  }
+  return xi;
 }
 function xiCounts(pids) {
   const c = { GK: 0, DF: 0, MF: 0, FW: 0 };
@@ -435,7 +456,10 @@ function effectiveXI(mid, gwIdx) {
       if (xi.includes(cand.id)) continue;
       const trial = [...xi];
       trial[idx] = cand.id;
-      if (xiValid(trial)) {
+      // swap must keep position counts inside the rules (length unchanged)
+      const c = xiCounts(trial);
+      const shapeOk = ['GK', 'DF', 'MF', 'FW'].every(pos => c[pos] >= XI_RULES[pos][0] && c[pos] <= XI_RULES[pos][1]);
+      if (shapeOk) {
         xi[idx] = cand.id;
         subs.push({ out: pid, in: cand.id });
         break;
@@ -788,6 +812,7 @@ function bindSetup() {
   updateTotal();
   $('#demoBtn').onclick = enterDemo;
   $('#startDraft').onclick = () => {
+    if (!confirm('This starts the REAL draft for all four managers. Everyone ready?')) return;
     state.managers.forEach((m, i) => { if (!m.name.trim()) m.name = `Manager ${i + 1}`; });
     if (state.settings.squadSize < 11) { toast('Squads need at least 11 for a starting XI'); return; }
     state.draft.order = state.managers.map(m => m.id).sort(() => Math.random() - 0.5);
