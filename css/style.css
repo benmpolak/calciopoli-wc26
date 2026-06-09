@@ -229,6 +229,15 @@ input:focus, select:focus { border-color: var(--accent-dim); }
 .h2h-fx:last-child { border: none; }
 .h2h-win { font-weight: 800; color: var(--accent); }
 
+/* ---------- multiplayer ---------- */
+.overlay {
+  position: fixed; inset: 0; z-index: 90;
+  background: rgba(7, 10, 18, .82); backdrop-filter: blur(6px);
+  display: flex; align-items: center; justify-content: center;
+}
+.conn { color: var(--red); font-size: 13px; transition: color .3s; }
+.conn.up { color: var(--accent); }
+
 /* ---------- toast ---------- */
 #toast {
   position: fixed; bottom: 26px; left: 50%; transform: translateX(-50%) translateY(20px);

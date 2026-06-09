@@ -102,6 +102,57 @@ const pairingsFor = i => {
 /* ---------------- state ---------------- */
 let state = load() || freshState();
 
+/* ---------------- multiplayer (Firebase sync) ---------------- */
+const SYNC_OFF = new URLSearchParams(location.search).has('nosync');
+const WHO_KEY = 'wc26-whoami';
+let whoami = +localStorage.getItem(WHO_KEY) || null; // manager id, -1 = spectator
+let syncConnected = false;
+const syncOn = () => !SYNC_OFF && !!window.WCSync;
+const isCommissioner = () => whoami === state.managers[0]?.id;
+const canActFor = mid => !syncOn() || whoami === mid || isCommissioner();
+
+const SHARED_KEYS = ['phase', 'managers', 'settings', 'draft', 'lineups', 'transfers', 'waivers', 'adjustments', 'playerMap'];
+function sharedSnapshot() {
+  const o = {};
+  for (const k of SHARED_KEYS) o[k] = state[k];
+  return o;
+}
+function pushShared(path, val) {
+  if (syncOn()) window.WCSync.set(path, val).catch(e => console.warn('[sync] write failed', e));
+}
+function publishAll() {
+  if (syncOn()) window.WCSync.setRoot(sharedSnapshot()).catch(e => console.warn('[sync] publish failed', e));
+}
+const toArr = x => Array.isArray(x) ? x : (x ? Object.values(x) : []);
+
+window.onSharedSnapshot = data => {
+  if (SYNC_OFF) return;
+  if (!data) {
+    // cloud league is empty — publish if a game already started locally
+    if (state.phase !== 'setup') publishAll();
+    render();
+    return;
+  }
+  data.managers = toArr(data.managers);
+  data.draft = data.draft || {};
+  data.draft.order = toArr(data.draft.order);
+  data.draft.picks = toArr(data.draft.picks);
+  data.transfers = toArr(data.transfers);
+  data.lineups = data.lineups || {};
+  for (const mid of Object.keys(data.lineups)) {
+    data.lineups[mid] = data.lineups[mid] || {};
+    for (const gw of Object.keys(data.lineups[mid])) data.lineups[mid][gw] = toArr(data.lineups[mid][gw]);
+  }
+  data.waivers = data.waivers || {};
+  for (const gw of Object.keys(data.waivers)) data.waivers[gw] = { actions: toArr(data.waivers[gw].actions) };
+  data.adjustments = data.adjustments || {};
+  data.playerMap = data.playerMap || {};
+  for (const k of SHARED_KEYS) if (data[k] !== undefined) state[k] = data[k];
+  if (state.settings.maxPerCountry == null) state.settings.maxPerCountry = 3;
+  save(); render();
+};
+window.onSyncConnection = up => { syncConnected = up; renderSyncArea(); };
+
 function freshState() {
   return {
     phase: 'setup', // setup | draft | season
@@ -214,17 +265,37 @@ function draftedIds() { return new Set(state.draft.picks.map(p => p.playerId)); 
 function makePick(playerId) {
   const mid = currentManagerId();
   if (mid == null) return;
+  if (!canActFor(mid)) { toast(`It's ${managerName(mid)}'s pick — Moggi is watching you`); return; }
   const player = PLAYER_BY_ID[playerId];
-  if (!canPick(mid, player)) { toast(`${managerName(mid)} already has the max ${player.pos}s`); return; }
-  state.draft.picks.push({ managerId: mid, playerId, n: pickNo() + 1 });
-  if (pickNo() >= totalPicks()) {
-    state.phase = 'season';
-    state.view = 'team';
-    toast('Draft complete. Moggi has filed the paperwork. Game on.');
-  } else if (Math.random() < 0.3) {
-    toast(moggiSays());
+  if (!canPick(mid, player)) { toast(`${managerName(mid)} already has the max ${player.pos}s (or country limit)`); return; }
+  const rec = { managerId: mid, playerId, n: pickNo() + 1 };
+  const finishPick = total => {
+    if (total >= totalPicks()) {
+      state.phase = 'season';
+      if (whoami === mid) state.view = 'team';
+      pushShared('phase', 'season');
+      toast('Draft complete. Moggi has filed the paperwork. Game on.');
+    } else if (Math.random() < 0.3) {
+      toast(moggiSays());
+    }
+    save(); render();
+  };
+  if (syncOn()) {
+    const expected = pickNo();
+    window.WCSync.txn('draft/picks', cur => {
+      const arr = toArr(cur);
+      if (arr.length !== expected) return; // someone got there first — abort
+      arr.push(rec);
+      return arr;
+    }).then(res => {
+      if (!res.committed) { toast('Pick clashed — the board moved on'); return; }
+      state.draft.picks = toArr(res.snapshot.val());
+      finishPick(state.draft.picks.length);
+    }).catch(e => { console.warn(e); toast('Pick failed to send — check connection'); });
+  } else {
+    state.draft.picks.push(rec);
+    finishPick(state.draft.picks.length);
   }
-  save(); render();
 }
 function autoPick() {
   const mid = currentManagerId();
@@ -511,6 +582,12 @@ const NAV_ITEMS = [
 ];
 
 function render() {
+  // keep keyboard focus across re-renders (remote updates land mid-typing)
+  const ae = document.activeElement;
+  const focusId = ae && ae.id && (ae.tagName === 'INPUT' || ae.tagName === 'SELECT') ? ae.id : null;
+  let caret = null;
+  try { caret = focusId && ae.selectionStart != null ? ae.selectionStart : null; } catch { caret = null; }
+
   renderNav();
   renderSyncArea();
   const main = $('#main');
@@ -524,6 +601,37 @@ function render() {
     case 'settings': main.innerHTML = viewSettings(); bindSettings(); break;
     default: state.view = 'draft'; render();
   }
+  renderIdentity();
+  if (focusId) {
+    const el = document.getElementById(focusId);
+    if (el) {
+      el.focus();
+      try { if (caret != null) el.setSelectionRange(caret, caret); } catch { /* selects */ }
+    }
+  }
+}
+
+function renderIdentity() {
+  let ov = $('#whoOverlay');
+  const needed = syncOn() && state.phase !== 'setup' && !whoami;
+  if (!needed) { ov?.remove(); return; }
+  if (ov) return;
+  ov = document.createElement('div');
+  ov.id = 'whoOverlay';
+  ov.className = 'overlay';
+  ov.innerHTML = `<div class="card" style="max-width:420px;width:92%">
+    <h2>Who are you?</h2>
+    <p class="muted" style="font-size:13px;margin-bottom:14px">Actions from this device count for the manager you pick. Choose honestly — Moggi has your number. Literally.</p>
+    ${state.managers.map((m, i) => `<button class="btn ghost" data-who="${m.id}" style="width:100%;margin-bottom:8px;text-align:left">${esc(m.name)}${i === 0 ? ' <span class="tag">commissioner</span>' : ''}</button>`).join('')}
+    <button class="btn ghost" data-who="-1" style="width:100%;opacity:.7">Just watching</button>
+  </div>`;
+  document.body.appendChild(ov);
+  ov.querySelectorAll('[data-who]').forEach(b => b.onclick = () => {
+    whoami = +b.dataset.who;
+    localStorage.setItem(WHO_KEY, whoami);
+    render();
+    toast(whoami === -1 ? 'Spectator mode. Probably a journalist.' : `Welcome, ${managerName(whoami)}. This conversation is being recorded.`);
+  });
 }
 
 function renderNav() {
@@ -536,11 +644,23 @@ function renderNav() {
 
 function renderSyncArea() {
   const el = $('#syncArea');
-  if (state.phase !== 'season') { el.innerHTML = ''; return; }
-  const last = state.lastSync ? new Date(state.lastSync).toLocaleString('en-GB', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }) : 'never';
-  const live = anyMatchLive() ? '<span class="live-pill"><span class="rec"></span>LIVE</span>' : '';
-  el.innerHTML = `${live}<span>Last intercept: ${last}</span><button id="syncBtn" class="btn small">&#128222; Tap the lines</button>`;
-  $('#syncBtn').onclick = () => syncNow(true);
+  if (!el || state.phase === 'setup') { if (el) el.innerHTML = ''; return; }
+  const bits = [];
+  if (anyMatchLive()) bits.push('<span class="live-pill"><span class="rec"></span>LIVE</span>');
+  if (syncOn()) {
+    bits.push(`<span class="conn ${syncConnected ? 'up' : ''}" title="${syncConnected ? 'Live sync: connected' : 'Live sync: reconnecting — changes will queue'}">&#9679;</span>`);
+    const who = whoami === -1 ? 'Spectating' : (whoami ? esc(managerName(whoami)) : 'Who are you?');
+    bits.push(`<button class="tag" id="whoBtn" style="cursor:pointer" title="Switch who this device acts as">${who}</button>`);
+  }
+  if (state.phase === 'season') {
+    const last = state.lastSync ? new Date(state.lastSync).toLocaleString('en-GB', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }) : 'never';
+    bits.push(`<span>Last intercept: ${last}</span><button id="syncBtn" class="btn small">&#128222; Tap the lines</button>`);
+  }
+  el.innerHTML = bits.join('');
+  const wb = $('#whoBtn');
+  if (wb) wb.onclick = () => { whoami = null; localStorage.removeItem(WHO_KEY); render(); };
+  const sb = $('#syncBtn');
+  if (sb) sb.onclick = () => syncNow(true);
 }
 
 /* ----- setup ----- */
@@ -599,6 +719,7 @@ function bindSetup() {
     state.draft.order = state.managers.map(m => m.id).sort(() => Math.random() - 0.5);
     state.phase = 'draft';
     state.view = 'draft';
+    publishAll();
     save(); render();
     toast(`Draft order: ${state.draft.order.map(managerName).join(' → ')}`);
   };
@@ -715,7 +836,7 @@ function poolTable() {
         <td class="num muted">${p.age ?? ''}</td>
         <td class="num">${p.caps}</td>
         <td class="num">${p.goals}</td>
-        <td><button class="btn small" data-pick="${p.id}" ${canPick(mid, p) ? '' : 'disabled title="Position quota or country limit hit"'}>Draft</button></td>
+        <td><button class="btn small" data-pick="${p.id}" ${canPick(mid, p) && canActFor(mid) ? '' : `disabled title="${canActFor(mid) ? 'Position quota or country limit hit' : `${esc(managerName(mid))} is on the clock, not you`}"`}>Draft</button></td>
       </tr>`).join('')}
     </tbody>
   </table>
@@ -729,7 +850,15 @@ function bindDraft() {
   $('#poolTeam').onchange = e => { poolFilter.team = e.target.value; poolFilter.limit = 60; refreshPool(); };
   $('#poolPos').onchange = e => { poolFilter.pos = e.target.value; poolFilter.limit = 60; refreshPool(); };
   bindPoolTable();
-  $('#undoPick').onclick = () => { state.draft.picks.pop(); save(); render(); };
+  $('#undoPick').onclick = () => {
+    if (syncOn() && !isCommissioner()) { toast('Only the commissioner can undo a pick'); return; }
+    if (syncOn()) {
+      window.WCSync.txn('draft/picks', cur => { const a = toArr(cur); a.pop(); return a; })
+        .then(res => { state.draft.picks = toArr(res.snapshot.val()); save(); render(); });
+    } else {
+      state.draft.picks.pop(); save(); render();
+    }
+  };
   $('#autoPick').onclick = autoPick;
 }
 function refreshPool() {
@@ -817,7 +946,8 @@ function viewTeam() {
             return `<span class="order-chip ${cls}">${esc(managerName(wmid))}</span>`;
           }).join('<span class="muted" style="align-self:center">›</span>')}
         </div>
-        ${wv.complete ? `<p class="muted" style="font-size:12.5px">Waiver round complete. The Trough reopens next gameweek.</p>` : `
+        ${wv.complete ? `<p class="muted" style="font-size:12.5px">Waiver round complete. The Trough reopens next gameweek.</p>`
+        : !canActFor(wv.turnMid) ? `<p class="muted" style="font-size:12.5px"><b style="color:var(--text)">${esc(managerName(wv.turnMid))}</b> is at the Trough. Lean on them in the group chat.</p>` : `
         <p style="font-size:13px;margin-bottom:8px"><b>${esc(managerName(wv.turnMid))}</b> is at the Trough</p>
         <select id="trOut" style="width:100%;margin-bottom:8px">
           <option value="">Player out…</option>
@@ -857,6 +987,7 @@ function bindTeam() {
   const gw = teamView.gw, mid = teamView.mid;
   if (!gwIsOver(gw)) {
     document.querySelectorAll('[data-toggle]').forEach(row => row.onclick = () => {
+      if (!canActFor(mid)) { toast(`That's ${managerName(mid)}'s team, not yours`); return; }
       const pid = +row.dataset.toggle;
       const xi = [...lineupFor(mid, gw)];
       const i = xi.indexOf(pid);
@@ -866,6 +997,7 @@ function bindTeam() {
         xi.push(pid);
       }
       (state.lineups[mid] = state.lineups[mid] || {})[gw] = xi;
+      pushShared(`lineups/${mid}/${gw}`, xi);
       save(); render();
     });
   }
@@ -878,7 +1010,9 @@ function bindTeam() {
     out.onchange = () => { teamView.transferOut = +out.value || null; renderTrResults(); };
     search.oninput = renderTrResults;
     pass.onclick = () => {
+      if (!canActFor(wmid)) { toast(`It's ${managerName(wmid)}'s turn at the Trough`); return; }
       (state.waivers[cur] = state.waivers[cur] || { actions: [] }).actions.push({ mid: wmid, pass: true });
+      pushShared(`waivers/${cur}/actions`, state.waivers[cur].actions);
       save(); render();
       toast(`${managerName(wmid)} passes. The Trough remains untroubled.`);
     };
@@ -899,11 +1033,15 @@ function bindTeam() {
          <button class="btn small" style="margin-left:auto" data-trin="${p.id}" ${ok ? '' : `disabled title="${countryOk ? 'Position quota full' : 'Country limit reached'}"`}>Sign</button></div>`;
       }).join('') || '<span class="muted">The Trough is empty. Somehow.</span>';
       results.querySelectorAll('[data-trin]').forEach(b => b.onclick = () => {
+        if (!canActFor(wmid)) { toast(`It's ${managerName(wmid)}'s turn at the Trough`); return; }
         const inId = +b.dataset.trin, outId = teamView.transferOut;
         state.transfers.push({ managerId: wmid, outId, inId, gw: cur, n: state.transfers.length + 1 });
         (state.waivers[cur] = state.waivers[cur] || { actions: [] }).actions.push({ mid: wmid, outId, inId });
         const lu = state.lineups[wmid]?.[cur];
         if (lu) state.lineups[wmid][cur] = lu.filter(id => id !== outId);
+        pushShared('transfers', state.transfers);
+        pushShared(`waivers/${cur}/actions`, state.waivers[cur].actions);
+        if (state.lineups[wmid]?.[cur]) pushShared(`lineups/${wmid}/${cur}`, state.lineups[wmid][cur]);
         teamView.transferOut = null;
         save(); render();
         toast(`${PLAYER_BY_ID[inId].name} signed from the Trough. Moggi handled the paperwork.`);
@@ -931,6 +1069,7 @@ function bindTeam() {
         </select>
         <button class="btn small" id="tradeGo">Execute trade</button>`;
       $('#tradeGo').onclick = () => {
+        if (!canActFor(mid) && !canActFor(other)) { toast('You are not part of this trade'); return; }
         const a = +$('#tradeMine').value, b = +$('#tradeTheirs').value;
         if (!a || !b) { toast('Pick a player from each side'); return; }
         const pa = PLAYER_BY_ID[a], pb = PLAYER_BY_ID[b];
@@ -947,8 +1086,12 @@ function bindTeam() {
         state.transfers.push({ managerId: other, outId: b, inId: a, gw: cur, n: state.transfers.length + 1, trade: true });
         for (const [m2, gone] of [[mid, a], [other, b]]) {
           const lu = state.lineups[m2]?.[cur];
-          if (lu) state.lineups[m2][cur] = lu.filter(id => id !== gone);
+          if (lu) {
+            state.lineups[m2][cur] = lu.filter(id => id !== gone);
+            pushShared(`lineups/${m2}/${cur}`, state.lineups[m2][cur]);
+          }
         }
+        pushShared('transfers', state.transfers);
         save(); render();
         toast(`Trade done: ${pa.name} ↔ ${pb.name}. Nobody saw anything.`);
       };
@@ -1122,7 +1265,9 @@ function viewSettings() {
 }
 function bindSettings() {
   document.querySelectorAll('[data-score]').forEach(inp => inp.onchange = () => {
+    if (syncOn() && !isCommissioner()) { toast('Only the commissioner changes scoring'); render(); return; }
     state.settings.scoring[inp.dataset.score] = +inp.value || 0;
+    pushShared(`settings/scoring/${inp.dataset.score}`, state.settings.scoring[inp.dataset.score]);
     save(); toast('Scoring updated');
   });
   $('#exportBtn').onclick = () => {
@@ -1141,26 +1286,37 @@ function bindSettings() {
         const imported = JSON.parse(txt);
         if (!imported.managers || !imported.draft) throw new Error('bad file');
         if (!imported.lineups) { imported.lineups = {}; imported.transfers = []; }
-        state = imported; save(); render(); toast('League imported');
+        if (!imported.waivers) imported.waivers = {};
+        state = imported;
+        if (syncOn() && isCommissioner()) publishAll();
+        save(); render(); toast('League imported');
       } catch { toast('That file doesn’t look like a league export'); }
     });
   };
   $('#resetBtn').onclick = () => {
-    if (confirm('Wipe the league, draft and all scores?')) {
-      state = freshState(); save(); render();
+    if (syncOn() && !isCommissioner()) { toast('Only the commissioner can reset the league'); return; }
+    if (confirm('Wipe the league, draft and all scores — for EVERYONE?')) {
+      state = freshState();
+      if (syncOn()) window.WCSync.setRoot(null);
+      save(); render();
     }
   };
   $('#adjApply').onclick = () => {
+    if (syncOn() && !isCommissioner()) { toast('Only the commissioner adjusts points'); return; }
     const pid = +$('#adjPlayer').value, pts = +$('#adjPts').value || 0;
     if (!pid) return;
     state.adjustments[pid] = (state.adjustments[pid] || 0) + pts;
+    pushShared(`adjustments/${pid}`, state.adjustments[pid]);
     save(); render(); toast('Adjustment applied');
   };
   document.querySelectorAll('[data-um]').forEach(sel => sel.onchange = () => {
     const u = state.unmatched[+sel.dataset.um];
     const pid = +sel.value;
     if (!u || !pid) return;
-    if (u.espnId) state.playerMap[u.espnId] = pid;
+    if (u.espnId) {
+      state.playerMap[u.espnId] = pid;
+      pushShared(`playerMap/${u.espnId}`, pid);
+    }
     state.unmatched = state.unmatched.filter(x => x !== u);
     delete state.matchStats[u.eventId]; // reprocess this match on next sync
     save(); render();
