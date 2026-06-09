@@ -4,7 +4,6 @@
 const LS_KEY = 'wc26-draft-league';
 const ESPN_BASE = 'https://site.api.espn.com/apis/site/v2/sports/soccer/fifa.world';
 const TOURN_RANGE = '20260611-20260720';
-const TRANSFER_CAP = 5;
 
 const TEAM_BY_NAME = Object.fromEntries(TEAMS.map(t => [t.name, t]));
 const PLAYER_BY_ID = Object.fromEntries(PLAYERS.map(p => [p.id, p]));
@@ -112,11 +111,13 @@ function freshState() {
     settings: {
       squadSize: 15,
       quotas: { GK: 2, DF: 5, MF: 5, FW: 3 },
+      maxPerCountry: 3,
       scoring: { ...DEFAULT_SCORING },
     },
     draft: { order: [], picks: [] },
     lineups: {},           // managerId -> { gwIndex: [pid x11] }
-    transfers: [],         // [{managerId, outId, inId, gw, n}]
+    transfers: [],         // [{managerId, outId, inId, gw, n, trade?}]
+    waivers: {},           // gwIndex -> { actions: [{mid, outId?, inId?, pass?}] }
     fixtures: [],
     matchStats: {},        // eventId -> { label, date, final, playerStats: {pid:{st,sub,g,a,cs}} }
     playerMap: {},
@@ -131,6 +132,8 @@ function load() {
   try {
     const s = JSON.parse(localStorage.getItem(LS_KEY));
     if (s && !s.lineups) { s.lineups = {}; s.transfers = []; } // migrate pre-lineup saves
+    if (s && !s.waivers) s.waivers = {};
+    if (s && s.settings.maxPerCountry == null) s.settings.maxPerCountry = 3;
     return s;
   } catch { return null; }
 }
@@ -177,7 +180,19 @@ function ownedIdsAt(gwIdx) {
   for (const m of state.managers) for (const p of squadAt(m.id, gwIdx)) ids.add(p.id);
   return ids;
 }
-function transfersUsed(mid) { return state.transfers.filter(t => t.managerId === mid).length; }
+function countryCount(squad, team) { return squad.filter(p => p.team === team).length; }
+
+/* ---------------- gameweek waiver draft ---------------- */
+function waiverOrder(gwIdx) {
+  const anyFinal = GAMEWEEKS.some((g, i) => i < gwIdx && gwStatus(i) === 'final');
+  const base = anyFinal ? h2hStandings().map(r => r.id) : [...state.draft.order];
+  return [...base].reverse(); // bottom feeds first
+}
+function waiverState(gwIdx) {
+  const actions = state.waivers?.[gwIdx]?.actions || [];
+  const order = waiverOrder(gwIdx);
+  return { order, actions, turnMid: order[actions.length] ?? null, complete: actions.length >= order.length };
+}
 
 /* ---------------- draft logic ---------------- */
 function totalPicks() { return state.managers.length * state.settings.squadSize; }
@@ -191,7 +206,8 @@ function currentManagerId() {
 }
 function canPick(mid, player) {
   const q = state.settings.quotas;
-  return posCount(mid)[player.pos] < q[player.pos];
+  if (posCount(mid)[player.pos] >= q[player.pos]) return false;
+  return countryCount(managerSquad(mid), player.team) < state.settings.maxPerCountry;
 }
 function draftedIds() { return new Set(state.draft.picks.map(p => p.playerId)); }
 
@@ -263,8 +279,43 @@ function gwPlayerPoints(pid, gwIdx) {
   }
   return pts;
 }
+// did the player get on the pitch at all this gameweek?
+function appearedInGw(pid, gwIdx) {
+  for (const ev of Object.values(state.matchStats)) {
+    if (!inGw(ev.date, gwIdx)) continue;
+    const s = ev.playerStats?.[pid];
+    if (s && (s.st || s.sub)) return true;
+  }
+  return false;
+}
+// auto-subs: starters who never played are replaced by bench players who did,
+// best-rated first, keeping the XI shape legal
+function effectiveXI(mid, gwIdx) {
+  const xi = [...lineupFor(mid, gwIdx)];
+  const anySynced = Object.values(state.matchStats).some(ev => inGw(ev.date, gwIdx));
+  if (!anySynced) return { xi, subs: [] };
+  const squad = squadAt(mid, gwIdx);
+  const bench = squad.filter(p => !xi.includes(p.id) && appearedInGw(p.id, gwIdx))
+    .sort((a, b) => (b.goals * 3 + b.caps) - (a.goals * 3 + a.caps));
+  const subs = [];
+  for (const pid of [...xi]) {
+    if (appearedInGw(pid, gwIdx)) continue;
+    const idx = xi.indexOf(pid);
+    for (const cand of bench) {
+      if (xi.includes(cand.id)) continue;
+      const trial = [...xi];
+      trial[idx] = cand.id;
+      if (xiValid(trial)) {
+        xi[idx] = cand.id;
+        subs.push({ out: pid, in: cand.id });
+        break;
+      }
+    }
+  }
+  return { xi, subs };
+}
 function gwManagerPoints(mid, gwIdx) {
-  return lineupFor(mid, gwIdx).reduce((t, pid) => t + gwPlayerPoints(pid, gwIdx), 0);
+  return effectiveXI(mid, gwIdx).xi.reduce((t, pid) => t + gwPlayerPoints(pid, gwIdx), 0);
 }
 function managerPoints(mid) {
   let pts = 0;
@@ -517,6 +568,10 @@ function viewSetup() {
           <div><label>${POS_LABEL[pos]}</label>
           <input type="number" min="0" max="11" data-quota="${pos}" value="${q[pos]}"></div>`).join('')}
       </div>
+      <div style="margin-top:12px;display:flex;align-items:center;gap:10px">
+        <label style="font-size:12px;color:var(--muted);font-weight:700">MAX PLAYERS PER COUNTRY</label>
+        <input type="number" min="1" max="26" id="maxCountry" value="${state.settings.maxPerCountry}" style="width:70px">
+      </div>
       <div class="setup-total" id="setupTotal"></div>
     </div>
     <button class="btn" id="startDraft" style="padding:14px;font-size:16px">Randomise order &amp; start the draft</button>
@@ -527,7 +582,7 @@ function bindSetup() {
     const q = state.settings.quotas;
     const total = q.GK + q.DF + q.MF + q.FW;
     state.settings.squadSize = total;
-    $('#setupTotal').innerHTML = `Squad size: <b>${total}</b> each &middot; <b>${total * state.managers.length}</b> of ${PLAYERS.length} players drafted &middot; starting XI picked each gameweek &middot; ${TRANSFER_CAP} transfers each`;
+    $('#setupTotal').innerHTML = `Squad size: <b>${total}</b> each &middot; <b>${total * state.managers.length}</b> of ${PLAYERS.length} players drafted &middot; starting XI picked each gameweek &middot; weekly waiver draft, bottom first`;
   };
   document.querySelectorAll('[data-mgr]').forEach(inp => inp.oninput = () => {
     state.managers.find(m => m.id === +inp.dataset.mgr).name = inp.value;
@@ -536,6 +591,7 @@ function bindSetup() {
     state.settings.quotas[inp.dataset.quota] = Math.max(0, +inp.value || 0);
     updateTotal();
   });
+  $('#maxCountry').oninput = e => { state.settings.maxPerCountry = Math.max(1, +e.target.value || 3); };
   updateTotal();
   $('#startDraft').onclick = () => {
     state.managers.forEach((m, i) => { if (!m.name.trim()) m.name = `Manager ${i + 1}`; });
@@ -659,7 +715,7 @@ function poolTable() {
         <td class="num muted">${p.age ?? ''}</td>
         <td class="num">${p.caps}</td>
         <td class="num">${p.goals}</td>
-        <td><button class="btn small" data-pick="${p.id}" ${canPick(mid, p) ? '' : 'disabled title="Position full"'}>Draft</button></td>
+        <td><button class="btn small" data-pick="${p.id}" ${canPick(mid, p) ? '' : 'disabled title="Position quota or country limit hit"'}>Draft</button></td>
       </tr>`).join('')}
     </tbody>
   </table>
@@ -715,9 +771,9 @@ function viewTeam() {
   const counts = xiCounts(xi);
   const valid = xiValid(xi);
   const locked = gwIsOver(gw);
-  const used = transfersUsed(mid);
   const cur = currentGwIndex();
   const ownedNow = ownedIdsAt(cur);
+  const wv = waiverState(cur);
 
   const countsBar = ['GK', 'DF', 'MF', 'FW'].map(pos => {
     const [lo, hi] = XI_RULES[pos];
@@ -753,18 +809,35 @@ function viewTeam() {
     </div>
     <div class="draft-side">
       <div class="card">
-        <h2>Transfers <span class="tag">${used}/${TRANSFER_CAP} used</span></h2>
-        <p class="muted" style="font-size:12px;margin-bottom:10px">Drop anyone, take anyone from the Trough (every undrafted player). Takes effect from GW${GAMEWEEKS[cur].n}.</p>
-        ${used >= TRANSFER_CAP ? '<p class="warn">No transfers left. Moggi suggests you should have planned better.</p>' : `
+        <h2>GW${GAMEWEEKS[cur].n} Waiver Draft</h2>
+        <p class="muted" style="font-size:12px;margin-bottom:10px">One swap each per gameweek from the Trough. Bottom of the table feeds first.</p>
+        <div class="order-strip" style="margin-bottom:10px">
+          ${wv.order.map((wmid, i) => {
+            const cls = i < wv.actions.length ? 'done' : (wmid === wv.turnMid ? 'now' : '');
+            return `<span class="order-chip ${cls}">${esc(managerName(wmid))}</span>`;
+          }).join('<span class="muted" style="align-self:center">›</span>')}
+        </div>
+        ${wv.complete ? `<p class="muted" style="font-size:12.5px">Waiver round complete. The Trough reopens next gameweek.</p>` : `
+        <p style="font-size:13px;margin-bottom:8px"><b>${esc(managerName(wv.turnMid))}</b> is at the Trough</p>
         <select id="trOut" style="width:100%;margin-bottom:8px">
           <option value="">Player out…</option>
-          ${squadAt(mid, cur).sort((a, b) => POS_ORDER[a.pos] - POS_ORDER[b.pos]).map(p => `<option value="${p.id}" ${teamView.transferOut === p.id ? 'selected' : ''}>${p.pos} — ${esc(p.name)} (${esc(p.team)})</option>`).join('')}
+          ${squadAt(wv.turnMid, cur).sort((a, b) => POS_ORDER[a.pos] - POS_ORDER[b.pos]).map(p => `<option value="${p.id}" ${teamView.transferOut === p.id ? 'selected' : ''}>${p.pos} — ${esc(p.name)} (${esc(p.team)})</option>`).join('')}
         </select>
         <input type="text" id="trSearch" placeholder="Search the Trough — ${PLAYERS.length - ownedNow.size} players sniffing about…" style="width:100%;margin-bottom:8px">
-        <div id="trResults" class="pick-log"></div>`}
+        <div id="trResults" class="pick-log"></div>
+        <button class="btn ghost small" id="trPass" style="margin-top:8px">Pass — nothing in the Trough for me</button>`}
         <h3 style="margin-top:16px">Transfer log</h3>
         ${state.transfers.filter(t => t.managerId === mid).map(t =>
-          `<div class="lrow" style="font-size:12.5px;padding:3px 0"><span class="muted">GW${GAMEWEEKS[t.gw].n}</span> ${esc(PLAYER_BY_ID[t.outId].name)} <span class="muted">→</span> <b>${esc(PLAYER_BY_ID[t.inId].name)}</b></div>`).join('') || '<span class="muted" style="font-size:12.5px">None yet.</span>'}
+          `<div class="lrow" style="font-size:12.5px;padding:3px 0"><span class="muted">GW${GAMEWEEKS[t.gw].n}${t.trade ? ' ↔' : ''}</span> ${esc(PLAYER_BY_ID[t.outId].name)} <span class="muted">→</span> <b>${esc(PLAYER_BY_ID[t.inId].name)}</b></div>`).join('') || '<span class="muted" style="font-size:12.5px">None yet.</span>'}
+      </div>
+      <div class="card">
+        <h2>Trade desk</h2>
+        <p class="muted" style="font-size:12px;margin-bottom:10px">Agreed in the group? Swap one player between two squads. Doesn't use a waiver turn.</p>
+        <select id="tradeWith" style="width:100%;margin-bottom:8px">
+          <option value="">Trade ${esc(managerName(mid))} with…</option>
+          ${state.managers.filter(m => m.id !== mid).map(m => `<option value="${m.id}">${esc(m.name)}</option>`).join('')}
+        </select>
+        <div id="tradePickers"></div>
       </div>
       <div class="card">
         <h2>Gameweek points</h2>
@@ -796,35 +869,90 @@ function bindTeam() {
       save(); render();
     });
   }
-  const out = $('#trOut'), search = $('#trSearch'), results = $('#trResults');
+  // --- waiver draft ---
+  const out = $('#trOut'), search = $('#trSearch'), results = $('#trResults'), pass = $('#trPass');
   if (out) {
+    const cur = currentGwIndex();
+    const wv = waiverState(cur);
+    const wmid = wv.turnMid;
     out.onchange = () => { teamView.transferOut = +out.value || null; renderTrResults(); };
     search.oninput = renderTrResults;
+    pass.onclick = () => {
+      (state.waivers[cur] = state.waivers[cur] || { actions: [] }).actions.push({ mid: wmid, pass: true });
+      save(); render();
+      toast(`${managerName(wmid)} passes. The Trough remains untroubled.`);
+    };
     function renderTrResults() {
       const q = normName(search.value || '');
       if (!teamView.transferOut) { results.innerHTML = '<span class="muted" style="font-size:12.5px">Pick who goes out first, then raid the Trough.</span>'; return; }
-      const cur = currentGwIndex();
       const owned = ownedIdsAt(cur);
+      const outP = PLAYER_BY_ID[teamView.transferOut];
+      const squadAfterOut = squadAt(wmid, cur).filter(p => p.id !== outP.id);
       let pool = PLAYERS.filter(p => !owned.has(p.id));
       if (q) pool = pool.filter(p => normName(p.name).includes(q) || normName(p.team).includes(q));
       pool.sort((a, b) => (b.goals * 3 + b.caps) - (a.goals * 3 + a.caps));
-      results.innerHTML = pool.slice(0, 15).map(p =>
-        `<div class="lrow"><span class="pos-badge pos-${p.pos}">${p.pos}</span>${flagImg(p.team)} ${esc(p.name)} <span class="muted" style="font-size:11px">${esc(p.team)}</span>
-         <button class="btn small" style="margin-left:auto" data-trin="${p.id}">Sign</button></div>`).join('') || '<span class="muted">The Trough is empty. Somehow.</span>';
+      results.innerHTML = pool.slice(0, 15).map(p => {
+        const posOk = p.pos === outP.pos || posCount(wmid)[p.pos] < state.settings.quotas[p.pos] + (p.pos === outP.pos ? 1 : 0);
+        const countryOk = countryCount(squadAfterOut, p.team) < state.settings.maxPerCountry;
+        const ok = posOk && countryOk;
+        return `<div class="lrow"><span class="pos-badge pos-${p.pos}">${p.pos}</span>${flagImg(p.team)} ${esc(p.name)} <span class="muted" style="font-size:11px">${esc(p.team)}</span>
+         <button class="btn small" style="margin-left:auto" data-trin="${p.id}" ${ok ? '' : `disabled title="${countryOk ? 'Position quota full' : 'Country limit reached'}"`}>Sign</button></div>`;
+      }).join('') || '<span class="muted">The Trough is empty. Somehow.</span>';
       results.querySelectorAll('[data-trin]').forEach(b => b.onclick = () => {
         const inId = +b.dataset.trin, outId = teamView.transferOut;
-        if (transfersUsed(mid) >= TRANSFER_CAP) { toast('No transfers left'); return; }
-        const gwNow = currentGwIndex();
-        state.transfers.push({ managerId: mid, outId, inId, gw: gwNow, n: state.transfers.length + 1 });
-        // drop the outgoing player from this GW's stored lineup if present
-        const lu = state.lineups[mid]?.[gwNow];
-        if (lu) state.lineups[mid][gwNow] = lu.filter(id => id !== outId);
+        state.transfers.push({ managerId: wmid, outId, inId, gw: cur, n: state.transfers.length + 1 });
+        (state.waivers[cur] = state.waivers[cur] || { actions: [] }).actions.push({ mid: wmid, outId, inId });
+        const lu = state.lineups[wmid]?.[cur];
+        if (lu) state.lineups[wmid][cur] = lu.filter(id => id !== outId);
         teamView.transferOut = null;
         save(); render();
-        toast(`${PLAYER_BY_ID[inId].name} signed. Moggi handled the paperwork.`);
+        toast(`${PLAYER_BY_ID[inId].name} signed from the Trough. Moggi handled the paperwork.`);
       });
     }
     renderTrResults();
+  }
+  // --- trade desk ---
+  const tradeWith = $('#tradeWith'), pickers = $('#tradePickers');
+  if (tradeWith) {
+    tradeWith.onchange = () => {
+      const other = +tradeWith.value;
+      if (!other) { pickers.innerHTML = ''; return; }
+      const cur = currentGwIndex();
+      const mine = squadAt(mid, cur).sort((a, b) => POS_ORDER[a.pos] - POS_ORDER[b.pos]);
+      const theirs = squadAt(other, cur).sort((a, b) => POS_ORDER[a.pos] - POS_ORDER[b.pos]);
+      pickers.innerHTML = `
+        <select id="tradeMine" style="width:100%;margin-bottom:8px">
+          <option value="">${esc(managerName(mid))} gives…</option>
+          ${mine.map(p => `<option value="${p.id}">${p.pos} — ${esc(p.name)} (${esc(p.team)})</option>`).join('')}
+        </select>
+        <select id="tradeTheirs" style="width:100%;margin-bottom:8px">
+          <option value="">${esc(managerName(other))} gives…</option>
+          ${theirs.map(p => `<option value="${p.id}">${p.pos} — ${esc(p.name)} (${esc(p.team)})</option>`).join('')}
+        </select>
+        <button class="btn small" id="tradeGo">Execute trade</button>`;
+      $('#tradeGo').onclick = () => {
+        const a = +$('#tradeMine').value, b = +$('#tradeTheirs').value;
+        if (!a || !b) { toast('Pick a player from each side'); return; }
+        const pa = PLAYER_BY_ID[a], pb = PLAYER_BY_ID[b];
+        if (pa.pos !== pb.pos) {
+          const qa = posCount(mid), qb = posCount(other), q = state.settings.quotas;
+          if (qa[pb.pos] >= q[pb.pos] || qb[pa.pos] >= q[pa.pos]) { toast('Trade breaks a position quota'); return; }
+        }
+        const max = state.settings.maxPerCountry;
+        if (countryCount(squadAt(mid, cur).filter(p => p.id !== a), pb.team) >= max ||
+            countryCount(squadAt(other, cur).filter(p => p.id !== b), pa.team) >= max) {
+          toast('Trade breaks the country limit'); return;
+        }
+        state.transfers.push({ managerId: mid, outId: a, inId: b, gw: cur, n: state.transfers.length + 1, trade: true });
+        state.transfers.push({ managerId: other, outId: b, inId: a, gw: cur, n: state.transfers.length + 1, trade: true });
+        for (const [m2, gone] of [[mid, a], [other, b]]) {
+          const lu = state.lineups[m2]?.[cur];
+          if (lu) state.lineups[m2][cur] = lu.filter(id => id !== gone);
+        }
+        save(); render();
+        toast(`Trade done: ${pa.name} ↔ ${pb.name}. Nobody saw anything.`);
+      };
+    };
   }
 }
 
