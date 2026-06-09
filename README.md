@@ -3,8 +3,12 @@
 Private draft fantasy World Cup 2026 game for four managers. A Calciopoli Production.
 
 ## What it is
-- Snake draft over all 1,246 players from the 48 official FIFA final squads
-- Live scoring synced from ESPN's public World Cup feed (no API key, no accounts)
+- Snake draft over all 1,246 players from the 48 official FIFA final squads ("The Console")
+- Squads of 15, **starting XI picked each gameweek** — only starters score (1 GK, 3–5 DF, 2–5 MF, 1–3 FW)
+- 7 gameweeks: group matchdays 1–3, R32, R16, QF, semis+final
+- **Head-to-head**: paired against a rival each gameweek (win 3 / draw 1 / loss 0), plus an overall points table
+- **Transfers**: 5 each — drop anyone, sign anyone from the Trough (undrafted players)
+- Live scoring synced from ESPN's public World Cup feed, including in-play (no API key, no accounts)
 - Pure static site — no backend, state lives in the browser (localStorage)
 
 ## Scoring (editable in Settings)

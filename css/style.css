@@ -211,6 +211,24 @@ input:focus, select:focus { border-color: var(--accent-dim); }
 .score-row input { width: 70px; text-align: right; }
 .unmatched-row { display: flex; gap: 8px; align-items: center; padding: 6px 0; font-size: 13px; flex-wrap: wrap; }
 
+/* ---------- my team / lineups ---------- */
+.team-controls { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-bottom: 18px; padding: 14px 18px; }
+.team-controls select { min-width: 160px; }
+.lineup-row { user-select: none; }
+.lineup-row.benched { opacity: .45; }
+.lineup-row.benched:hover, .lineup-row.starting:hover { background: rgba(45,212,167,.06); opacity: 1; }
+.xi-chip { font-size: 10px; font-weight: 800; letter-spacing: .5px; padding: 2px 8px; border-radius: 5px; background: var(--card2); color: var(--muted); margin-left: 6px; flex: none; }
+.lineup-row.starting .xi-chip { background: rgba(45,212,167,.18); color: var(--accent); }
+.quota-pill.bad { background: rgba(239,100,97,.14); color: var(--red); border-color: rgba(239,100,97,.4); }
+.warn { color: var(--red); font-size: 12.5px; margin: 8px 0; }
+.live-pill { display: inline-flex; align-items: center; gap: 6px; font-size: 11px; font-weight: 800; color: var(--red); letter-spacing: 1px; }
+.live-tag { color: var(--red); display: inline-flex; align-items: center; gap: 5px; }
+
+/* ---------- head-to-head ---------- */
+.h2h-fx { display: flex; align-items: center; gap: 14px; padding: 9px 0; font-size: 14.5px; border-bottom: 1px solid rgba(38,50,80,.4); }
+.h2h-fx:last-child { border: none; }
+.h2h-win { font-weight: 800; color: var(--accent); }
+
 /* ---------- toast ---------- */
 #toast {
   position: fixed; bottom: 26px; left: 50%; transform: translateX(-50%) translateY(20px);
