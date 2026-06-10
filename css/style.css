@@ -295,3 +295,11 @@ input:focus, select:focus { border-color: var(--accent-dim); }
 ::-webkit-scrollbar { width: 10px; height: 10px; }
 ::-webkit-scrollbar-thumb { background: var(--card2); border-radius: 6px; }
 ::-webkit-scrollbar-track { background: transparent; }
+
+/* ---------- pick clock ---------- */
+.pick-clock {
+  font-variant-numeric: tabular-nums; font-weight: 800; font-size: 20px;
+  color: var(--accent); min-width: 58px; text-align: center;
+  background: var(--bg2); border: 1px solid var(--line); border-radius: 9px; padding: 5px 8px;
+}
+.pick-clock.urgent { color: #fff; background: var(--red); border-color: var(--red); animation: rec-blink .5s infinite; }

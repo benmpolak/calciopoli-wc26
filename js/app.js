@@ -190,9 +190,10 @@ function freshState() {
       squadSize: 23,
       quotas: { GK: 3, DF: 7, MF: 7, FW: 6 },
       maxPerCountry: 4,
+      pickTimer: 30,
       scoring: { ...DEFAULT_SCORING },
     },
-    draft: { order: [], picks: [], breaksDone: [] },
+    draft: { order: [], picks: [], breaksDone: [], timewastes: {} },
     lineups: {},           // managerId -> { gwIndex: [pid x11] }
     shirtNums: {},         // managerId -> { pid: customNumber }
     transfers: [],         // [{managerId, outId, inId, gw, n, trade?}]
@@ -272,6 +273,7 @@ function load() {
     if (s && !s.waivers) s.waivers = {};
     if (s && !s.shirtNums) s.shirtNums = {};
     if (s && s.settings.maxPerCountry == null) s.settings.maxPerCountry = 3;
+    if (s && s.settings.pickTimer == null) s.settings.pickTimer = 0;
     return s;
   } catch { return null; }
 }
@@ -346,14 +348,18 @@ function canPick(mid, player) {
 }
 function draftedIds() { return new Set(state.draft.picks.map(p => p.playerId)); }
 
-function makePick(playerId) {
+function makePick(playerId, force = false) {
   const mid = currentManagerId();
   if (mid == null) return;
-  if (!canActFor(mid)) { toast(`It's ${managerName(mid)}'s pick — Moggi is watching you`); return; }
+  if (!force && !canActFor(mid)) { toast(`It's ${managerName(mid)}'s pick — Moggi is watching you`); return; }
   const player = PLAYER_BY_ID[playerId];
   if (!canPick(mid, player)) { toast(`${managerName(mid)} already has the max ${player.pos}s (or country limit)`); return; }
   const rec = { managerId: mid, playerId, n: pickNo() + 1 };
   const finishPick = total => {
+    if (state.settings.pickTimer && total < totalPicks()) {
+      state.draft.deadline = Date.now() + state.settings.pickTimer * 1000;
+      pushShared('draft/deadline', state.draft.deadline);
+    }
     if (total >= totalPicks()) {
       state.phase = 'season';
       if (whoami === mid) state.view = 'team';
@@ -381,13 +387,13 @@ function makePick(playerId) {
     finishPick(state.draft.picks.length);
   }
 }
-function autoPick() {
+function autoPick(force = false) {
   const mid = currentManagerId();
   if (mid == null) return;
   const taken = draftedIds();
   const best = PLAYERS.filter(p => !taken.has(p.id) && canPick(mid, p))
-    .sort((a, b) => (b.goals * 3 + b.caps) - (a.goals * 3 + a.caps))[0];
-  if (best) makePick(best.id);
+    .sort((a, b) => rating(b) - rating(a))[0];
+  if (best) makePick(best.id, force);
 }
 
 /* ---------------- lineups ---------------- */
@@ -818,9 +824,13 @@ function viewSetup() {
           <div><label>${POS_LABEL[pos]}</label>
           <input type="number" min="0" max="11" data-quota="${pos}" value="${q[pos]}"></div>`).join('')}
       </div>
-      <div style="margin-top:12px;display:flex;align-items:center;gap:10px">
+      <div style="margin-top:12px;display:flex;align-items:center;gap:10px;flex-wrap:wrap">
         <label style="font-size:12px;color:var(--muted);font-weight:700">MAX PLAYERS PER COUNTRY</label>
         <input type="number" min="1" max="26" id="maxCountry" value="${state.settings.maxPerCountry}" style="width:70px">
+        <label style="font-size:12px;color:var(--muted);font-weight:700;margin-left:10px">PICK TIMER</label>
+        <select id="pickTimer">
+          ${[0, 30, 45, 60].map(t => `<option value="${t}" ${state.settings.pickTimer === t ? 'selected' : ''}>${t ? t + 's — Moggi picks at zero' : 'Off'}</option>`).join('')}
+        </select>
       </div>
       <div class="setup-total" id="setupTotal"></div>
     </div>
@@ -843,6 +853,7 @@ function bindSetup() {
     updateTotal();
   });
   $('#maxCountry').oninput = e => { state.settings.maxPerCountry = Math.max(1, +e.target.value || 3); };
+  $('#pickTimer').onchange = e => { state.settings.pickTimer = +e.target.value || 0; };
   updateTotal();
   $('#demoBtn').onclick = enterDemo;
   $('#startDraft').onclick = () => {
@@ -850,6 +861,7 @@ function bindSetup() {
     state.managers.forEach((m, i) => { if (!m.name.trim()) m.name = `Manager ${i + 1}`; });
     if (state.settings.squadSize < 11) { toast('Squads need at least 11 for a starting XI'); return; }
     state.draft.order = state.managers.map(m => m.id).sort(() => Math.random() - 0.5);
+    if (state.settings.pickTimer) state.draft.deadline = Date.now() + 5 * 60 * 1000;
     state.phase = 'draft';
     state.view = 'draft';
     publishAll();
@@ -916,7 +928,7 @@ function showCeremony() {
   const order = state.draft.order;
   if (!order.length) return;
   const steps = [
-    { h: '&#9917; THE OPENING CEREMONY', p: 'Live and exclusive coverage with David Pruttone, alongside Big Al Brazil, who has been here since the gallops. Iain, be upstanding. Especially you.' },
+    { h: '&#9917; THE OPENING CEREMONY', p: 'Live and exclusive coverage with David Prutton, alongside Big Al Brazil, who has been here since the gallops. Iain, be upstanding. Especially you.' },
     { h: '&#127884; THE PARADE OF NATIONS', p: '', parade: true },
     { h: '&#127908; Main stage', p: 'Coldplay perform Viva la Vida in its 9-minute extended ceremony arrangement. Chris Martin has been told this is a four-man WhatsApp league. He says every league is beautiful.' },
     { h: '&#127930; The anthems', p: 'The stadium now rises for a full and unabridged rendition of North London Forever. Marc weeps openly. Iain has been located attempting to leave the venue. Stewards have returned him to his seat.', anthem: true },
@@ -1012,21 +1024,25 @@ function maybeDrinksBreak() {
   $('#breakDone').onclick = () => {
     state.draft.breaksDone = [...(state.draft.breaksDone || []), n];
     pushShared('draft/breaksDone', state.draft.breaksDone);
+    if (state.settings.pickTimer) {
+      state.draft.deadline = Date.now() + state.settings.pickTimer * 1000;
+      pushShared('draft/deadline', state.draft.deadline);
+    }
     save(); render();
   };
 }
 
 /* ----- the punditry desk ----- */
 const PUNDITS = {
-  prutton: { name: 'David Pruttone', emoji: '&#127897;&#65039;', init: 'DP', cls: 'pa-dp' },
+  prutton: { name: 'David Prutton', emoji: '&#127897;&#65039;', init: 'DP', cls: 'pa-dp' },
   al: { name: 'Big Al Brazil', emoji: '&#127866;', init: 'AB', cls: 'pa-al' },
-  redknapp: { name: 'Jamie Redknappe', emoji: '&#128084;', init: 'JR', cls: 'pa-jr' },
+  redknapp: { name: 'Jamie Redknapp', emoji: '&#128084;', init: 'JR', cls: 'pa-jr' },
   coisty: { name: 'Ally McCoisty', emoji: '&#128516;', init: 'AM', cls: 'pa-am' },
 };
 // certified lobus registry: big centre-forwards, great feet for big men
 const LOBUS_LIST = ['haaland', 'sorloth', 'strand larsen', 'gyokeres', 'lukaku', 'batshuayi',
   'fullkrug', 'weghorst', 'brobbey', 'en nesyri', 'azmoun', 'petkovic', 'budimir',
-  'arnautovic', 'embolo', 'nunez', 'dykes', 'giroud', 'kane', 'mateta', 'guirassy'];
+  'arnautovic', 'embolo', 'nunez', 'dykes', 'giroud', 'kane', 'mateta', 'guirassy', 'igor thiago', 'ali daei'];
 
 function pundComment(pk) {
   const p = PLAYER_BY_ID[pk.playerId];
@@ -1043,7 +1059,7 @@ function pundComment(pk) {
       : `${mgr} drafts Cristiano Ronaldo, 41. The pension fund grows.`, sound: 'cheer' };
   }
   if (LOBUS_LIST.some(l => nm.includes(l)) && p.pos === 'FW') {
-    return { who: 'al', line: `LOBUS KLAXON! Congrats ${mgr}, enjoy your shiny new lobus. ${p.name}. Big unit. Great feet for a big man.`, sound: 'cheer' };
+    return { who: 'al', line: `LOBUS KLAXON — sponsored by Ali Daei, Iranian legend, 108 international goals, the original lobus. Congrats ${mgr}, enjoy your shiny new lobus: ${p.name}. Big unit. Great feet for a big man.`, sound: 'cheer' };
   }
   if ((p.club || '').toLowerCase().includes('manchester city')) {
     return { who: 'redknapp', line: mgrN.includes('iain')
@@ -1177,7 +1193,9 @@ function viewDraft() {
       <div class="pick-meta">Pick ${n + 1} of ${totalPicks()} &middot; Round ${round} of ${state.settings.squadSize}</div>
       <div class="intercept"><span class="rec"></span>LIVE INTERCEPT &mdash; &ldquo;${esc(interceptFor(n, managerName(mid)))}&rdquo;</div>
     </div>
-    <div style="display:flex;gap:8px">
+    <div style="display:flex;gap:8px;align-items:center">
+      ${state.settings.pickTimer ? '<span class="pick-clock" id="pickClock">–:––</span>' : ''}
+      ${state.settings.pickTimer ? `<button class="btn ghost small" id="timewasteBtn" title="Take it to the corner flag (+60s)">&#8987; Timewaste (${2 - (state.draft.timewastes?.[mid] || 0)} left)</button>` : ''}
       <button class="btn ghost small" id="undoPick" ${n === 0 ? 'disabled' : ''}>Undo last</button>
       <button class="btn ghost small" id="autoPick" title="Luciano makes a call. Untraceable, naturally.">&#128222; Ask Moggi</button>
     </div>
@@ -1281,8 +1299,41 @@ function poolTable() {
   ${total > poolFilter.limit ? `<div class="show-more"><button class="btn ghost small" id="showMore">Show more (${total - poolFilter.limit} hidden)</button></div>` : ''}`;
 }
 
+let clockTimer = null;
+let firedDeadline = 0;
 function bindDraft() {
+  clearInterval(clockTimer);
   if (state.phase === 'season') return;
+  if (state.settings.pickTimer) {
+    const mid = currentManagerId();
+    const tw = $('#timewasteBtn');
+    if (tw) {
+      const used = state.draft.timewastes?.[mid] || 0;
+      tw.disabled = used >= 2 || !canActFor(mid);
+      tw.onclick = () => {
+        if ((state.draft.timewastes?.[mid] || 0) >= 2) { toast('No timewastes left — play on'); return; }
+        (state.draft.timewastes = state.draft.timewastes || {})[mid] = (state.draft.timewastes[mid] || 0) + 1;
+        state.draft.deadline = (state.draft.deadline || Date.now()) + 60 * 1000;
+        pushShared('draft/timewastes', state.draft.timewastes);
+        pushShared('draft/deadline', state.draft.deadline);
+        save(); render();
+        toast(`${managerName(mid)} is timewasting. Taking it to the corner flag.`);
+      };
+    }
+    clockTimer = setInterval(() => {
+      const el = $('#pickClock');
+      if (!el || state.phase !== 'draft') { clearInterval(clockTimer); return; }
+      if ($('#drinksBreak') || $('#ceremony')) return; // clock politely waits for pomp
+      const left = Math.max(0, Math.round(((state.draft.deadline || 0) - Date.now()) / 1000));
+      el.textContent = `${Math.floor(left / 60)}:${String(left % 60).padStart(2, '0')}`;
+      el.classList.toggle('urgent', left <= 10);
+      if (left <= 0 && state.draft.deadline && firedDeadline !== state.draft.deadline) {
+        firedDeadline = state.draft.deadline;
+        toast('Time! Moggi makes the call.');
+        autoPick(true);
+      }
+    }, 400);
+  }
   const q = $('#poolQ');
   q.oninput = () => { poolFilter.q = q.value; poolFilter.limit = 60; refreshPool(); };
   $('#poolTeam').onchange = e => { poolFilter.team = e.target.value; poolFilter.limit = 60; refreshPool(); };
@@ -1460,19 +1511,23 @@ function bindTeam() {
     search.oninput = renderTrResults;
     function renderTrResults() {
       const q = normName(search.value || '');
-      if (!teamView.transferOut) { results.innerHTML = '<span class="muted" style="font-size:12.5px">Pick who goes out first, then raid the Trough.</span>'; return; }
       const owned = ownedIdsAt(cur);
-      const outP = PLAYER_BY_ID[teamView.transferOut];
-      const squadAfterOut = squadAt(mid, cur).filter(p => p.id !== outP.id);
+      const outP = teamView.transferOut ? PLAYER_BY_ID[teamView.transferOut] : null;
+      const squadAfterOut = squadAt(mid, cur).filter(p => !outP || p.id !== outP.id);
       let pool = PLAYERS.filter(p => !owned.has(p.id));
-      if (q) pool = pool.filter(p => normName(p.name).includes(q) || normName(p.team).includes(q));
+      if (q) pool = pool.filter(p => normName(p.name).includes(q) || normName(p.team).includes(q) || normName(p.club).includes(q));
+      // once an out-player is chosen, only show players who'd fit the squad shape
+      if (outP) pool = pool.filter(p => p.pos === outP.pos || posCount(mid)[p.pos] < state.settings.quotas[p.pos]);
       pool.sort((a, b) => rating(b) - rating(a));
-      results.innerHTML = pool.slice(0, 15).map(p => {
-        const posOk = p.pos === outP.pos || posCount(mid)[p.pos] < state.settings.quotas[p.pos];
+      const hint = outP ? `<div class="muted" style="font-size:11.5px;padding:2px 0 6px">Replacements for ${esc(outP.name)} (${outP.pos}):</div>`
+        : '<div class="muted" style="font-size:11.5px;padding:2px 0 6px">Browsing the Trough — choose a player out above to unlock signing.</div>';
+      results.innerHTML = hint + pool.slice(0, 20).map(p => {
+        const posOk = !outP || p.pos === outP.pos || posCount(mid)[p.pos] < state.settings.quotas[p.pos];
         const countryOk = countryCount(squadAfterOut, p.team) < state.settings.maxPerCountry;
-        const ok = posOk && countryOk;
-        return `<div class="lrow"><span class="pos-badge pos-${p.pos}">${p.pos}</span>${flagImg(p.team)} ${esc(p.name)} <span class="muted" style="font-size:11px">${esc(p.team)}</span>
-         <button class="btn small" style="margin-left:auto" data-trin="${p.id}" ${ok ? '' : `disabled title="${countryOk ? 'Position quota full' : 'Country limit reached'}"`}>Sign</button></div>`;
+        const ok = outP && posOk && countryOk;
+        const why = !outP ? 'Pick who goes out first' : !countryOk ? 'Country limit reached' : 'Position quota full';
+        return `<div class="lrow"><span class="pos-badge pos-${p.pos}">${p.pos}</span>${flagImg(p.team)} ${esc(p.name)} <span class="muted" style="font-size:11px">${esc(p.team)} · ${rating(p)} pts</span>
+         <button class="btn small" style="margin-left:auto" data-trin="${p.id}" ${ok ? '' : `disabled title="${why}"`}>Sign</button></div>`;
       }).join('') || '<span class="muted">The Trough is empty. Somehow.</span>';
       results.querySelectorAll('[data-trin]').forEach(b => b.onclick = () => {
         if (!canActFor(mid)) { toast(`That's ${managerName(mid)}'s swap, not yours`); return; }
