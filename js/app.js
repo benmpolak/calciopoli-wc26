@@ -333,9 +333,48 @@ function shirtNum(mid, pid) {
 }
 
 /* ---------------- gameweek waiver draft ---------------- */
-// the Trough: one free-agent swap per manager per gameweek, no queue, no ceremony
+// Trough modes: group stage = open (one swap, no queue); GW4 = the R32 Re-Draft
+// (ordered, multi-round, bottom feeds first); later knockouts = ordered, one each
+function waiverMode(gwIdx) { return gwIdx <= 2 ? 'open' : gwIdx === 3 ? 'redraft' : 'ordered'; }
 function troughUsed(mid, gwIdx) {
   return (state.waivers?.[gwIdx]?.actions || []).some(a => a.mid === mid);
+}
+// standings using ONLY gameweeks final before gwIdx — deterministic, can't reshuffle mid-round
+function standingsBefore(gwIdx) {
+  const rows = state.managers.map(m => ({ id: m.id, h2h: 0, pts: 0 }));
+  const byId = Object.fromEntries(rows.map(r => [r.id, r]));
+  let anyFinal = false;
+  for (let i = 0; i < Math.min(gwIdx, GAMEWEEKS.length); i++) {
+    if (gwStatus(i) !== 'final') continue;
+    anyFinal = true;
+    for (const r of rows) r.pts += gwManagerPoints(r.id, i);
+    for (const [a, b] of pairingsFor(i)) {
+      const pa = gwManagerPoints(a, i), pb = gwManagerPoints(b, i);
+      if (pa > pb) byId[a].h2h += 3;
+      else if (pb > pa) byId[b].h2h += 3;
+      else { byId[a].h2h++; byId[b].h2h++; }
+    }
+  }
+  rows.sort((x, y) => y.h2h - x.h2h || y.pts - x.pts || x.id - y.id);
+  return { rows, anyFinal };
+}
+function waiverOrder(gwIdx) {
+  const { rows, anyFinal } = standingsBefore(gwIdx);
+  const base = anyFinal ? rows.map(r => r.id) : [...state.draft.order];
+  return [...base].reverse(); // bottom feeds first
+}
+function waiverState(gwIdx) {
+  const mode = waiverMode(gwIdx);
+  const actions = state.waivers?.[gwIdx]?.actions || [];
+  if (mode === 'open') return { mode, actions, order: [], turnMid: null, complete: false };
+  const order = waiverOrder(gwIdx);
+  if (mode === 'ordered') {
+    return { mode, order, actions, turnMid: order[actions.length] ?? null, complete: actions.length >= order.length };
+  }
+  // redraft: keep cycling the order until a full lap of passes
+  const lap = actions.slice(-order.length);
+  const complete = actions.length >= order.length && lap.every(a => a.pass);
+  return { mode, order, actions, turnMid: complete ? null : order[actions.length % order.length], complete };
 }
 
 /* ---------------- draft logic ---------------- */
@@ -1111,13 +1150,65 @@ function pundComment(pk) {
     `${p.name} at pick ${pk.n}. The Trough nods approvingly. Sticking with 2-1.`,
   ]) };
 }
+const COUNTRY_FACTS = {
+ "Czech Republic": "Most beer consumed per person on Earth, thirty years running. Training, basically.",
+ "Mexico": "The asteroid that killed the dinosaurs landed here. The country recovered and has now hosted three World Cups.",
+ "South Africa": "Has the only street on Earth where two Nobel Prize winners lived (Vilakazi Street, Soweto).",
+ "South Korea": "Until 2023, everyone here was legally born aged one. The country abolished its own counting system.",
+ "Bosnia and Herzegovina": "Sarajevo had one of Europe’s first full-time electric tram networks, before Vienna.",
+ "Canada": "Contains 9% of the world’s forests and apologises to each tree individually.",
+ "Qatar": "No income tax. End to end, shorter than the M25.",
+ "Switzerland": "Illegal to own just one guinea pig. They get lonely. This is the law.",
+ "Brazil": "Has an island so full of venomous snakes the navy banned anyone from visiting it.",
+ "Haiti": "The only nation in history founded by a successful slave revolt.",
+ "Morocco": "Home of the world’s oldest university — founded by a woman in 859 AD.",
+ "Scotland": "National animal: the unicorn. Genuinely. Official.",
+ "Australia": "Went to war against emus in 1932. Lost. The emus remain at large.",
+ "Paraguay": "One of the few countries whose flag has a different design on each side. Nobody can say why with confidence.",
+ "Turkey": "Santa Claus was born here. St Nicholas, of Patara. Lapland is a cover story.",
+ "United States": "Has a town called Boring, officially twinned with Dull in Scotland.",
+ "Curaçao": "The blue liqueur comes in four colours. They all taste identical. Nobody minds.",
+ "Ecuador": "The summit of Chimborazo is the farthest point from Earth’s centre — closer to space than Everest.",
+ "Germany": "It is illegal to run out of petrol on the autobahn. Plan accordingly.",
+ "Ivory Coast": "Home to the largest church on Earth — bigger than St Peter’s, in a town of 200,000.",
+ "Japan": "Has an island run entirely by rabbits. They are in charge.",
+ "Netherlands": "Tallest people on Earth, living in a country largely below sea level. They built the extra land themselves.",
+ "Sweden": "IKEA names products after Swedish places — and the doormats after Danish ones. On purpose.",
+ "Tunisia": "Star Wars’ Tatooine is named after the real Tunisian town of Tataouine. The sets are still there.",
+ "Belgium": "Once went 589 days without a government. Largely nobody noticed.",
+ "Egypt": "Cleopatra lived closer in time to the iPhone than to the building of the pyramids.",
+ "Iran": "Was storing ice in the desert 2,400 years ago using buildings shaped like giant Walnut Whips.",
+ "New Zealand": "Five sheep for every person. The sheep remain humble.",
+ "Cape Verde": "Named after a green cape that is not in Cape Verde. It’s in Senegal.",
+ "Saudi Arabia": "Imports camels. From Australia.",
+ "Spain": "Holds an annual festival where 20,000 strangers throw 150 tonnes of tomatoes at each other.",
+ "Uruguay": "National anthem runs over five minutes — the world’s longest. The crowd needs a sit down before kickoff.",
+ "France": "The French army still maintains carrier pigeons. Just in case.",
+ "Iraq": "Invented writing. The oldest documents in existence include beer receipts.",
+ "Norway": "Knighted a penguin. Sir Nils Olav inspects the King’s Guard to this day.",
+ "Senegal": "Has a bright pink lake salty enough to float a centre-half.",
+ "Algeria": "The Algerian Sahara alone is bigger than all of Western Europe.",
+ "Argentina": "Patagonia hosts an annual Welsh eisteddfod. The tea houses are excellent.",
+ "Austria": "The village of Fücking renamed itself Fugging in 2021 because tourists kept stealing the signs.",
+ "Jordan": "Petra was carved by hand into a cliff, then lost to the outside world for a thousand years.",
+ "Colombia": "Pablo Escobar’s four escaped hippos now number 150+ and are a matter of national debate.",
+ "DR Congo": "Home of the bonobo, the only ape that settles every argument peacefully. Unlike this group chat.",
+ "Portugal": "Home of the world’s oldest working bookshop (Lisbon, 1732). National dish: a fish not found in its waters.",
+ "Uzbekistan": "One of only two double-landlocked countries on Earth — two borders between it and any sea.",
+ "Croatia": "Invented the necktie. “Cravat” literally means “Croat”. Every office worker owes them.",
+ "England": "Big Ben is the bell, not the tower. A pedant will confirm this at every party, forever.",
+ "Ghana": "Gave the world the dancing pallbearers. A nation of strong meme exports.",
+ "Panama": "The only place on Earth to watch the sun rise over the Pacific and set over the Atlantic."
+};
+
 function punditAva(pd) { return `<span class="pundit-ava ${pd.cls}" title="${pd.name}">${pd.init}</span>`; }
 function punditryDesk() {
   const recent = [...state.draft.picks].slice(-3).reverse();
   const lines = recent.length ? recent.map(pk => {
     const c = pundComment(pk);
     const pd = PUNDITS[c.who];
-    return `<div class="pundit-line">${punditAva(pd)}<div><b>${pd.name}</b><p>${esc(c.line)}</p></div></div>`;
+    const fact = COUNTRY_FACTS[PLAYER_BY_ID[pk.playerId].team];
+    return `<div class="pundit-line">${punditAva(pd)}<div><b>${pd.name}</b><p>${esc(c.line)}</p>${fact ? `<p class="country-fact">&#127757; ${esc(PLAYER_BY_ID[pk.playerId].team)}: ${esc(fact)}</p>` : ''}</div></div>`;
   }).join('') : `<div class="pundit-line">${punditAva(PUNDITS.prutton)}<div><b>${PUNDITS.prutton.name}</b><p>Welcome to draft night, live and exclusive. Alongside me: Big Al, who's been here since the gallops; Jamie, who has literally never been more excited; and Ally, who loves all 1,246 players equally. I'm predicting 2-1.</p></div></div>`;
   return `<div class="card">
     <h2>The Punditry Desk <span class="tag">LIVE on Sky Sports The Console</span></h2>
@@ -1438,19 +1529,33 @@ function viewTeam() {
     </div>
     <div class="draft-side">
       <div class="card">
-        <h2>The Trough <span class="tag">GW${GAMEWEEKS[cur].n}</span></h2>
-        <p class="muted" style="font-size:12px;margin-bottom:10px">One swap per manager per gameweek — drop anyone, sign any free agent. No queue, no ceremony. You're welcome, Iain.</p>
-        <div class="quota-bar" style="margin-bottom:10px">
-          ${state.managers.map(m => `<span class="quota-pill ${troughUsed(m.id, cur) ? 'full' : ''}">${esc(m.name)} ${troughUsed(m.id, cur) ? '✓ fed' : '—'}</span>`).join('')}
-        </div>
-        ${swapUsed ? `<p class="muted" style="font-size:12.5px">${esc(managerName(mid))} has fed this gameweek. The Trough reopens GW${GAMEWEEKS[Math.min(cur + 1, GAMEWEEKS.length - 1)].n}.</p>`
-        : !canActFor(mid) ? `<p class="muted" style="font-size:12.5px">That's ${esc(managerName(mid))}'s swap, not yours.</p>` : `
-        <select id="trOut" style="width:100%;margin-bottom:8px">
-          <option value="">Player out…</option>
-          ${squadAt(mid, cur).sort((a, b) => POS_ORDER[a.pos] - POS_ORDER[b.pos]).map(p => `<option value="${p.id}" ${teamView.transferOut === p.id ? 'selected' : ''}>${p.pos} — ${esc(p.name)} (${esc(p.team)})</option>`).join('')}
-        </select>
-        <input type="text" id="trSearch" placeholder="Search the Trough — ${PLAYERS.length - ownedNow.size} players sniffing about…" style="width:100%;margin-bottom:8px">
-        <div id="trResults" class="pick-log"></div>`}
+        ${(() => {
+          const wv = waiverState(cur);
+          const title = wv.mode === 'redraft' ? `THE R32 RE-DRAFT <span class="tag">country cap now ${state.settings.maxPerCountry}</span>`
+            : wv.mode === 'ordered' ? `GW${GAMEWEEKS[cur].n} Waivers <span class="tag">bottom feeds first</span>`
+            : `The Trough <span class="tag">GW${GAMEWEEKS[cur].n}</span>`;
+          const blurb = wv.mode === 'redraft' ? 'The great replenishment: snake through the order, swap as many as you like, pass when done. Round ends after a full lap of passes.'
+            : wv.mode === 'ordered' ? 'One swap each, in reverse table order. Pass if the Trough offers nothing.'
+            : 'One swap per manager this gameweek — drop anyone, sign any free agent. No queue, no ceremony. You\'re welcome, Iain.';
+          const chips = wv.mode === 'open'
+            ? `<div class="quota-bar" style="margin-bottom:10px">${state.managers.map(m => `<span class="quota-pill ${troughUsed(m.id, cur) ? 'full' : ''}">${esc(m.name)} ${troughUsed(m.id, cur) ? '✓ fed' : '—'}</span>`).join('')}</div>`
+            : `<div class="order-strip" style="margin-bottom:10px">${wv.order.map(om => `<span class="order-chip ${om === wv.turnMid ? 'now' : ''}">${esc(managerName(om))}</span>`).join('<span class="muted" style="align-self:center">›</span>')}</div>`;
+          const actorMid = wv.mode === 'open' ? mid : wv.turnMid;
+          let body;
+          if (wv.complete) body = `<p class="muted" style="font-size:12.5px">Round complete. The Trough reopens next gameweek.</p>`;
+          else if (wv.mode === 'open' && troughUsed(mid, cur)) body = `<p class="muted" style="font-size:12.5px">${esc(managerName(mid))} has fed this gameweek.</p>`;
+          else if (!canActFor(actorMid)) body = `<p class="muted" style="font-size:12.5px"><b style="color:var(--text)">${esc(managerName(actorMid))}</b> is at the Trough. Lean on them in the group chat.</p>`;
+          else body = `
+            ${wv.mode !== 'open' ? `<p style="font-size:13px;margin-bottom:8px"><b>${esc(managerName(actorMid))}</b> is at the Trough</p>` : ''}
+            <select id="trOut" style="width:100%;margin-bottom:8px">
+              <option value="">Player out…</option>
+              ${squadAt(actorMid, cur).sort((a, b) => POS_ORDER[a.pos] - POS_ORDER[b.pos]).map(p => `<option value="${p.id}" ${teamView.transferOut === p.id ? 'selected' : ''}>${p.pos} — ${esc(p.name)} (${esc(p.team)})</option>`).join('')}
+            </select>
+            <input type="text" id="trSearch" placeholder="Search the Trough — ${PLAYERS.length - ownedNow.size} players sniffing about…" style="width:100%;margin-bottom:8px">
+            <div id="trResults" class="pick-log"></div>
+            ${wv.mode !== 'open' ? `<button class="btn ghost small" id="trPass" style="margin-top:8px">Pass${wv.mode === 'redraft' ? ' — I\'m done feeding' : ''}</button>` : ''}`;
+          return `<h2>${title}</h2><p class="muted" style="font-size:12px;margin-bottom:10px">${blurb}</p>${chips}${body}`;
+        })()}
         <h3 style="margin-top:16px">Transfer log</h3>
         ${state.transfers.filter(t => t.managerId === mid).map(t =>
           `<div class="lrow" style="font-size:12.5px;padding:3px 0"><span class="muted">GW${GAMEWEEKS[t.gw].n}${t.trade ? ' ↔' : ''}</span> ${esc(PLAYER_BY_ID[t.outId].name)} <span class="muted">→</span> <b>${esc(PLAYER_BY_ID[t.inId].name)}</b></div>`).join('') || '<span class="muted" style="font-size:12.5px">None yet.</span>'}
@@ -1513,26 +1618,35 @@ function bindTeam() {
     save(); render();
     toast(`${PLAYER_BY_ID[pid].name} takes the number ${n} shirt`);
   });
-  // --- the Trough (one swap per manager per gameweek, no queue) ---
-  const out = $('#trOut'), search = $('#trSearch'), results = $('#trResults');
+  // --- the Trough / waivers / re-draft ---
+  const out = $('#trOut'), search = $('#trSearch'), results = $('#trResults'), passBtn = $('#trPass');
   if (out) {
     const cur = currentGwIndex();
+    const wv = waiverState(cur);
+    const actorMid = wv.mode === 'open' ? mid : wv.turnMid;
     out.onchange = () => { teamView.transferOut = +out.value || null; renderTrResults(); };
     search.oninput = renderTrResults;
+    if (passBtn) passBtn.onclick = () => {
+      if (!canActFor(actorMid)) { toast(`It's ${managerName(actorMid)}'s turn`); return; }
+      (state.waivers[cur] = state.waivers[cur] || { actions: [] }).actions.push({ mid: actorMid, pass: true });
+      pushShared(`waivers/${cur}/actions`, state.waivers[cur].actions);
+      teamView.transferOut = null;
+      save(); render();
+      toast(`${managerName(actorMid)} passes.`);
+    };
     function renderTrResults() {
       const q = normName(search.value || '');
       const owned = ownedIdsAt(cur);
       const outP = teamView.transferOut ? PLAYER_BY_ID[teamView.transferOut] : null;
-      const squadAfterOut = squadAt(mid, cur).filter(p => !outP || p.id !== outP.id);
+      const squadAfterOut = squadAt(actorMid, cur).filter(p => !outP || p.id !== outP.id);
       let pool = PLAYERS.filter(p => !owned.has(p.id));
       if (q) pool = pool.filter(p => normName(p.name).includes(q) || normName(p.team).includes(q) || normName(p.club).includes(q));
-      // once an out-player is chosen, only show players who'd fit the squad shape
-      if (outP) pool = pool.filter(p => p.pos === outP.pos || posCount(mid)[p.pos] < state.settings.quotas[p.pos]);
+      if (outP) pool = pool.filter(p => p.pos === outP.pos || posCount(actorMid)[p.pos] < state.settings.quotas[p.pos]);
       pool.sort((a, b) => rating(b) - rating(a));
       const hint = outP ? `<div class="muted" style="font-size:11.5px;padding:2px 0 6px">Replacements for ${esc(outP.name)} (${outP.pos}):</div>`
         : '<div class="muted" style="font-size:11.5px;padding:2px 0 6px">Browsing the Trough — choose a player out above to unlock signing.</div>';
       results.innerHTML = hint + pool.slice(0, 20).map(p => {
-        const posOk = !outP || p.pos === outP.pos || posCount(mid)[p.pos] < state.settings.quotas[p.pos];
+        const posOk = !outP || p.pos === outP.pos || posCount(actorMid)[p.pos] < state.settings.quotas[p.pos];
         const countryOk = countryCount(squadAfterOut, p.team) < countryCapNow(cur);
         const ok = outP && posOk && countryOk;
         const why = !outP ? 'Pick who goes out first' : !countryOk ? 'Country limit reached' : 'Position quota full';
@@ -1540,21 +1654,21 @@ function bindTeam() {
          <button class="btn small" style="margin-left:auto" data-trin="${p.id}" ${ok ? '' : `disabled title="${why}"`}>Sign</button></div>`;
       }).join('') || '<span class="muted">The Trough is empty. Somehow.</span>';
       results.querySelectorAll('[data-trin]').forEach(b => b.onclick = () => {
-        if (!canActFor(mid)) { toast(`That's ${managerName(mid)}'s swap, not yours`); return; }
-        if (troughUsed(mid, cur)) { toast('Swap already used this gameweek'); return; }
+        if (!canActFor(actorMid)) { toast(`It's ${managerName(actorMid)}'s turn at the Trough`); return; }
+        if (wv.mode === 'open' && troughUsed(actorMid, cur)) { toast('Swap already used this gameweek'); return; }
         const inId = +b.dataset.trin, outId = teamView.transferOut;
         const inP = PLAYER_BY_ID[inId];
-        if (countryCount(squadAt(mid, cur).filter(x => x.id !== outId), inP.team) >= countryCapNow(cur)) { toast('Country limit reached'); return; }
-        state.transfers.push({ managerId: mid, outId, inId, gw: cur, n: state.transfers.length + 1 });
-        (state.waivers[cur] = state.waivers[cur] || { actions: [] }).actions.push({ mid, outId, inId });
-        const lu = state.lineups[mid]?.[cur];
-        if (lu) state.lineups[mid][cur] = lu.filter(id => id !== outId);
+        if (countryCount(squadAt(actorMid, cur).filter(x => x.id !== outId), inP.team) >= countryCapNow(cur)) { toast('Country limit reached'); return; }
+        state.transfers.push({ managerId: actorMid, outId, inId, gw: cur, n: state.transfers.length + 1 });
+        (state.waivers[cur] = state.waivers[cur] || { actions: [] }).actions.push({ mid: actorMid, outId, inId });
+        const lu = state.lineups[actorMid]?.[cur];
+        if (lu) state.lineups[actorMid][cur] = lu.filter(id => id !== outId);
         pushShared('transfers', state.transfers);
         pushShared(`waivers/${cur}/actions`, state.waivers[cur].actions);
-        if (state.lineups[mid]?.[cur]) pushShared(`lineups/${mid}/${cur}`, state.lineups[mid][cur]);
+        if (state.lineups[actorMid]?.[cur]) pushShared(`lineups/${actorMid}/${cur}`, state.lineups[actorMid][cur]);
         teamView.transferOut = null;
         save(); render();
-        toast(`${PLAYER_BY_ID[inId].name} signed from the Trough. Moggi handled the paperwork.`);
+        toast(`${inP.name} signed from the Trough. Moggi handled the paperwork.`);
       });
     }
     renderTrResults();
@@ -1753,7 +1867,9 @@ function viewRules() {
       <h2>Head-to-head</h2>
       <p class="rules-p">Each gameweek you face one rival — your starters' points vs theirs. <b>Win 3, draw 1, loss 0.</b> Pairings rotate so everyone plays everyone. Tiebreak: overall points.</p>
       <h2 style="margin-top:18px">The Trough &amp; trades</h2>
-      <p class="rules-p"><b>The Trough:</b> one swap per manager per gameweek — drop anyone, sign any undrafted player, whenever you like. First come, first served.</p>
+      <p class="rules-p"><b>The Trough (group stage):</b> one swap per manager per gameweek — drop anyone, sign any undrafted player, whenever you like. First come, first served.</p>
+      <p class="rules-p"><b>THE R32 RE-DRAFT:</b> when the knockouts begin and the country cap rises, a full waiver session — reverse table order, bottom feeds first, as many swaps as you like on your turn, until a whole lap passes. Basically a second draft.</p>
+      <p class="rules-p"><b>Knockout waivers (GW5+):</b> one swap each, taken in reverse table order.</p>
       <p class="rules-p"><b>Trades:</b> player-for-player swaps between managers, any time, agreed in the group. Doesn't use your waiver turn.</p>
       <h2 style="margin-top:18px">The small print</h2>
       <p class="rules-p"><b>Proj. pts</b> in the Console is each player's projected tournament points — how far the bookies think his nation goes, how likely he is to start, and his international scoring record. A guide, not a guarantee. Moggi accepts no liability.</p>

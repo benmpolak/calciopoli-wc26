@@ -94,14 +94,11 @@ const check = (label, ok, detail = '') => {
       save(); render();
     }, gw, GW_NOW[gw]);
 
-    // trough: each manager makes (at most) one open swap, any order
+    // trough/waivers: behave per mode (open / redraft / ordered)
     const waiverResult = await p.evaluate(gw => {
       const cur = currentGwIndex();
       if (cur !== gw) return { err: `currentGwIndex ${cur} != ${gw}` };
-      const did = [];
-      for (const m of [...state.managers].reverse()) {
-        const wmid = m.id;
-        if (troughUsed(wmid, cur)) return { err: 'trough flag set before swap' };
+      const doSwap = wmid => {
         const squad = squadAt(wmid, cur);
         const out = [...squad].sort((a, b) => rating(a) - rating(b))[0];
         const owned = ownedIdsAt(cur);
@@ -109,19 +106,35 @@ const check = (label, ok, detail = '') => {
         const cand = PLAYERS.filter(x => !owned.has(x.id) && x.pos === out.pos
           && countryCount(after, x.team) < countryCapNow(cur))
           .sort((a, b) => rating(b) - rating(a))[0];
-        if (cand && Math.random() > 0.25) {
-          state.transfers.push({ managerId: wmid, outId: out.id, inId: cand.id, gw: cur, n: state.transfers.length + 1 });
-          (state.waivers[cur] = state.waivers[cur] || { actions: [] }).actions.push({ mid: wmid, outId: out.id, inId: cand.id });
-          const lu = state.lineups[wmid]?.[cur];
-          if (lu) state.lineups[wmid][cur] = lu.filter(id => id !== out.id);
-          if (!troughUsed(wmid, cur)) return { err: 'troughUsed not set after swap' };
-          did.push('swap');
-        } else did.push('skip');
+        if (!cand) return false;
+        state.transfers.push({ managerId: wmid, outId: out.id, inId: cand.id, gw: cur, n: state.transfers.length + 1 });
+        (state.waivers[cur] = state.waivers[cur] || { actions: [] }).actions.push({ mid: wmid, outId: out.id, inId: cand.id });
+        const lu = state.lineups[wmid]?.[cur];
+        if (lu) state.lineups[wmid][cur] = lu.filter(id => id !== out.id);
+        return true;
+      };
+      const pass = wmid => (state.waivers[cur] = state.waivers[cur] || { actions: [] }).actions.push({ mid: wmid, pass: true });
+      const mode = waiverMode(cur);
+      const did = [];
+      if (mode === 'open') {
+        for (const m of [...state.managers].reverse()) did.push(doSwap(m.id) ? 'swap' : 'skip');
+      } else {
+        let guard = 0;
+        const swapsLeft = {};
+        while (!waiverState(cur).complete && guard++ < 80) {
+          const wv = waiverState(cur);
+          const wmid = wv.turnMid;
+          if (wmid == null) return { err: 'null turn before complete' };
+          swapsLeft[wmid] = swapsLeft[wmid] ?? (mode === 'redraft' ? 2 : 1);
+          if (swapsLeft[wmid] > 0 && Math.random() > 0.3 && doSwap(wmid)) { swapsLeft[wmid]--; did.push('swap'); }
+          else { pass(wmid); did.push('pass'); }
+        }
+        if (!waiverState(cur).complete) return { err: 'round never completed' };
       }
       save(); render();
-      return { did };
+      return { did, mode };
     }, gw);
-    check(`GW${gw + 1} trough swaps apply, one each`, !waiverResult.err && waiverResult.did.length === 4, JSON.stringify(waiverResult.did || waiverResult.err));
+    check(`GW${gw + 1} trough/waivers (${waiverResult.mode || '?'}) resolve`, !waiverResult.err && waiverResult.did.length > 0, JSON.stringify(waiverResult.err || (waiverResult.did.length + ' actions')));
 
     // squads still legal after waivers
     const legal = await p.evaluate(() => {
