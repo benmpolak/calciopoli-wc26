@@ -136,7 +136,13 @@ window.onSharedSnapshot = data => {
     // everyone else treats empty cloud as the truth (so a deliberate reset sticks).
     if (state.phase !== 'setup') {
       if (isCommissioner()) {
-        publishAll();
+        if (confirm('The cloud league is empty but this device holds a game. Restore it for everyone? (Cancel = start fresh)')) {
+          publishAll();
+        } else {
+          state = freshState();
+          localStorage.removeItem('wc26-ceremony-seen');
+          save();
+        }
       } else {
         state = freshState();
         localStorage.removeItem('wc26-ceremony-seen');
