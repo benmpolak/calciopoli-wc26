@@ -267,6 +267,15 @@ input:focus, select:focus { border-color: var(--accent-dim); }
 .pundit-line b { font-size: 11px; color: var(--accent); display: block; margin-bottom: 2px; }
 .pundit-line p { color: var(--text); line-height: 1.45; }
 
+.shirt-no {
+  width: 24px; text-align: center; font-size: 11px; font-weight: 800; flex: none;
+  color: var(--gold); font-variant-numeric: tabular-nums;
+}
+.parade-slot { min-height: 150px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; }
+.parade-flag { width: 96px !important; height: 68px !important; border-radius: 6px; box-shadow: 0 6px 20px rgba(0,0,0,.5); animation: cer-pop .35s ease; }
+.parade-team { font-size: 19px; font-weight: 800; }
+.parade-bearer { font-size: 12.5px; color: var(--muted); font-style: italic; }
+
 .ceremony-name {
   font-size: 34px; font-weight: 800; color: var(--gold); padding: 14px 0;
   animation: cer-pop .4s ease;

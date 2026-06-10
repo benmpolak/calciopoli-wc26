@@ -115,7 +115,7 @@ const netOn = () => syncOn() && !demoMode;
 const isCommissioner = () => whoami === state.managers[0]?.id;
 const canActFor = mid => demoMode || !syncOn() || whoami === mid || isCommissioner();
 
-const SHARED_KEYS = ['phase', 'managers', 'settings', 'draft', 'lineups', 'transfers', 'waivers', 'adjustments', 'playerMap'];
+const SHARED_KEYS = ['phase', 'managers', 'settings', 'draft', 'lineups', 'transfers', 'waivers', 'adjustments', 'playerMap', 'shirtNums'];
 function sharedSnapshot() {
   const o = {};
   for (const k of SHARED_KEYS) o[k] = state[k];
@@ -168,6 +168,7 @@ window.onSharedSnapshot = data => {
   data.waivers = data.waivers || {};
   for (const gw of Object.keys(data.waivers)) data.waivers[gw] = { actions: toArr(data.waivers[gw].actions) };
   data.adjustments = data.adjustments || {};
+  data.shirtNums = data.shirtNums || {};
   data.playerMap = data.playerMap || {};
   for (const k of SHARED_KEYS) if (data[k] !== undefined) state[k] = data[k];
   if (state.settings.maxPerCountry == null) state.settings.maxPerCountry = 3;
@@ -193,6 +194,7 @@ function freshState() {
     },
     draft: { order: [], picks: [], breaksDone: [] },
     lineups: {},           // managerId -> { gwIndex: [pid x11] }
+    shirtNums: {},         // managerId -> { pid: customNumber }
     transfers: [],         // [{managerId, outId, inId, gw, n, trade?}]
     waivers: {},           // gwIndex -> { actions: [{mid, outId?, inId?, pass?}] }
     fixtures: [],
@@ -268,6 +270,7 @@ function load() {
     const s = JSON.parse(localStorage.getItem(LS_KEY));
     if (s && !s.lineups) { s.lineups = {}; s.transfers = []; } // migrate pre-lineup saves
     if (s && !s.waivers) s.waivers = {};
+    if (s && !s.shirtNums) s.shirtNums = {};
     if (s && s.settings.maxPerCountry == null) s.settings.maxPerCountry = 3;
     return s;
   } catch { return null; }
@@ -316,6 +319,9 @@ function ownedIdsAt(gwIdx) {
   return ids;
 }
 function countryCount(squad, team) { return squad.filter(p => p.team === team).length; }
+function shirtNum(mid, pid) {
+  return state.shirtNums?.[mid]?.[pid] ?? PLAYER_BY_ID[pid].no ?? '–';
+}
 
 /* ---------------- gameweek waiver draft ---------------- */
 // the Trough: one free-agent swap per manager per gameweek, no queue, no ceremony
@@ -854,12 +860,64 @@ function bindSetup() {
 }
 
 /* ----- opening ceremony (requested by Marc, dedicated to Iain) ----- */
+// each nation's flag is carried by a selected celebrity (selection panel: Moggi)
+const FLAG_BEARERS = {
+  'Czech Republic': 'Petr Čech, helmet on',
+  'Mexico': 'Salma Hayek',
+  'South Africa': 'Trevor Noah',
+  'South Korea': 'PSY, galloping',
+  'Bosnia and Herzegovina': 'Edin Džeko',
+  'Canada': 'Drake, who has already bet on himself',
+  'Qatar': 'a man with a briefcase',
+  'Switzerland': 'Roger Federer',
+  'Brazil': 'Ronaldinho, grinning',
+  'Haiti': 'Wyclef Jean',
+  'Morocco': 'French Montana',
+  'Scotland': 'Lewis Capaldi',
+  'Australia': 'Kylie Minogue',
+  'Paraguay': 'José Luis Chilavert, ready to take a free kick',
+  'Turkey': 'Salt Bae, seasoning the flagpole',
+  'United States': 'LeBron James, asking which sport this is',
+  'Curaçao': 'a very relaxed man with a cocktail',
+  'Ecuador': 'Julian Assange, out of practice waving',
+  'Germany': 'David Hasselhoff (their choice, not ours)',
+  'Ivory Coast': 'Didier Drogba',
+  'Japan': 'Mario, costume reused',
+  'Netherlands': 'André Rieu, conducting himself',
+  'Sweden': 'Zlatan, carrying the flag AND the parade',
+  'Tunisia': 'a Star Wars location scout',
+  'Belgium': 'Jean-Claude Van Damme, doing the splits',
+  'Egypt': 'Mo Salah',
+  'Iran': 'Andre Agassi (close enough)',
+  'New Zealand': 'Taika Waititi, haka pending',
+  'Cape Verde': 'Henrik Larsson (Cape Verdean dad — Sweden’s loss)',
+  'Saudi Arabia': 'Cristiano Ronaldo’s payroll department',
+  'Spain': 'Rosalía',
+  'Uruguay': 'Luis Suárez, flag held in teeth',
+  'France': 'Zinedine Zidane, headbutting the flagpole',
+  'Iraq': 'Zidane Iqbal, Manchester’s own',
+  'Norway': 'Magnus Carlsen, fourteen moves ahead',
+  'Senegal': 'Akon, building a city nearby',
+  'Algeria': 'DJ Snake',
+  'Argentina': 'Bizarrap, session #48',
+  'Austria': 'Arnold Schwarzenegger',
+  'Jordan': 'Queen Rania',
+  'Colombia': 'Shakira — hips legally required to attend',
+  'DR Congo': 'the entire rumba scene of Kinshasa',
+  'Portugal': 'Cristiano Ronaldo, contractually first in line',
+  'Uzbekistan': 'Ravshan Irmatov, referee — an associate of Moggi',
+  'Croatia': 'Luka Modrić',
+  'England': 'David Beckham',
+  'Ghana': 'Stormzy',
+  'Panama': 'Mariano Rivera — wrong sport, right country',
+};
 function showCeremony() {
   if ($('#ceremony')) return;
   const order = state.draft.order;
   if (!order.length) return;
   const steps = [
-    { h: '&#9917; THE OPENING CEREMONY', p: 'Live and exclusive coverage with David Pruttone, alongside Big Al Brazil, who has been here since the gallops. Please be upstanding for the parade of all 48 nations. Iain, you too. Especially you.' },
+    { h: '&#9917; THE OPENING CEREMONY', p: 'Live and exclusive coverage with David Pruttone, alongside Big Al Brazil, who has been here since the gallops. Iain, be upstanding. Especially you.' },
+    { h: '&#127884; THE PARADE OF NATIONS', p: '', parade: true },
     { h: '&#127908; Main stage', p: 'Coldplay perform Viva la Vida in its 9-minute extended ceremony arrangement. Chris Martin has been told this is a four-man WhatsApp league. He says every league is beautiful.' },
     { h: '&#127930; The anthems', p: 'The stadium now rises for a full and unabridged rendition of North London Forever. Marc weeps openly. Iain has been located attempting to leave the venue. Stewards have returned him to his seat.', anthem: true },
     { h: '&#129309; The draw', p: 'Luciano Moggi shuffles the envelopes. The envelopes were sealed. The seals were his.' },
@@ -874,16 +932,40 @@ function showCeremony() {
   ov.className = 'overlay';
   ov.innerHTML = '<div id="cerStage" style="display:flex;flex-direction:column;align-items:center;gap:12px;width:92%;max-width:520px"><div id="cerCard" style="width:100%"></div></div>';
   document.body.appendChild(ov);
+  let paradeTimer = null;
   const show = () => {
+    clearInterval(paradeTimer);
     if (i >= steps.length) { ov.remove(); return; }
     const s = steps[i];
     $('#cerCard').innerHTML = `<div class="card" style="text-align:center">
       <h2 style="margin-bottom:12px">${s.h}</h2>
-      ${s.big ? `<div class="ceremony-name">${esc(s.p)}</div>` : `<p class="rules-p" style="text-align:center">${esc(s.p)}</p>`}
+      ${s.parade ? '<div id="paradeSlot" class="parade-slot"></div>'
+        : s.big ? `<div class="ceremony-name">${esc(s.p)}</div>` : `<p class="rules-p" style="text-align:center">${esc(s.p)}</p>`}
       <div style="margin-top:18px;display:flex;gap:8px;justify-content:center">
         <button class="btn small" id="cerNext">${i === steps.length - 1 ? 'To the Console' : 'Continue the pomp'}</button>
         <button class="btn ghost small" id="cerSkip" title="Reserved for Iain">Skip ceremony (Iain's button)</button>
       </div></div>`;
+    if (s.parade) {
+      playSound('sting');
+      let f = 0;
+      const nations = TEAMS;
+      const showFlag = () => {
+        const slot = $('#paradeSlot');
+        if (!slot) { clearInterval(paradeTimer); return; }
+        if (f >= nations.length) {
+          slot.innerHTML = `<p class="rules-p" style="text-align:center">All 48 nations present. Iain checked his watch ${nations.length} times.</p>`;
+          clearInterval(paradeTimer);
+          return;
+        }
+        const t = nations[f];
+        slot.innerHTML = `${flagImg(t.name, true).replace('class="flag big"', 'class="flag parade-flag"')}
+          <div class="parade-team">${esc(t.name)}</div>
+          <div class="parade-bearer">flag carried by ${esc(FLAG_BEARERS[t.name] || 'a dignitary')}</div>`;
+        f++;
+      };
+      showFlag();
+      paradeTimer = setInterval(showFlag, 900);
+    }
     // the anthem takes the stage and plays on through the draw and the reveal
     if (s.anthem && !$('#cerPlayer')) {
       const player = document.createElement('div');
@@ -941,6 +1023,11 @@ const PUNDITS = {
   redknapp: { name: 'Jamie Redknappe', emoji: '&#128084;', init: 'JR', cls: 'pa-jr' },
   coisty: { name: 'Ally McCoisty', emoji: '&#128516;', init: 'AM', cls: 'pa-am' },
 };
+// certified lobus registry: big centre-forwards, great feet for big men
+const LOBUS_LIST = ['haaland', 'sorloth', 'strand larsen', 'gyokeres', 'lukaku', 'batshuayi',
+  'fullkrug', 'weghorst', 'brobbey', 'en nesyri', 'azmoun', 'petkovic', 'budimir',
+  'arnautovic', 'embolo', 'nunez', 'dykes', 'giroud', 'kane', 'mateta', 'guirassy'];
+
 function pundComment(pk) {
   const p = PLAYER_BY_ID[pk.playerId];
   const mgr = managerName(pk.managerId);
@@ -948,6 +1035,21 @@ function pundComment(pk) {
   const pick = arr => arr[seed % arr.length];
   const r = rating(p);
   const sameCountry = managerSquad(pk.managerId).filter(x => x.team === p.team).length;
+  const nm = normName(p.name), mgrN = normName(mgr);
+  // bespoke triggers — requested by the panel, vetted by nobody
+  if (nm.includes('cristiano ronaldo')) {
+    return { who: 'prutton', line: mgrN.includes('rick')
+      ? `Rick drafts Cristiano Ronaldo. Another middle-aged white guy joins the collection.`
+      : `${mgr} drafts Cristiano Ronaldo, 41. The pension fund grows.`, sound: 'cheer' };
+  }
+  if (LOBUS_LIST.some(l => nm.includes(l)) && p.pos === 'FW') {
+    return { who: 'al', line: `LOBUS KLAXON! Congrats ${mgr}, enjoy your shiny new lobus. ${p.name}. Big unit. Great feet for a big man.`, sound: 'cheer' };
+  }
+  if ((p.club || '').toLowerCase().includes('manchester city')) {
+    return { who: 'redknapp', line: mgrN.includes('iain')
+      ? `Iain drafts a Manchester City player. Hates pomp, apparently fine with oil.`
+      : `${p.name} of Manchester City. ${mgr}'s legal team are across the 115 charges as we speak.` };
+  }
   if (p.pos === 'GK' && pk.n <= state.managers.length * 2) {
     return { who: 'al', line: `A goalkeeper?! At pick ${pk.n}?! Honestly. I need a coffee. And by coffee I obviously mean a Guinness.`, sound: 'trombone' };
   }
@@ -1264,6 +1366,7 @@ function viewTeam() {
           const starting = xi.includes(p.id);
           const pts = gwPlayerPoints(p.id, gw);
           return `<div class="squad-row lineup-row ${starting ? 'starting' : 'benched'}" data-toggle="${p.id}" ${locked ? '' : 'style="cursor:pointer"'}>
+            <span class="shirt-no" data-num="${p.id}" title="Click to assign a squad number">${shirtNum(mid, p.id)}</span>
             <span class="pos-badge pos-${p.pos}">${p.pos}</span>${flagImg(p.team)}
             <span>${esc(p.name)}</span>
             <span class="muted" style="font-size:11.5px">${esc(p.team)}</span>
@@ -1332,6 +1435,23 @@ function bindTeam() {
       save(); render();
     });
   }
+  // --- custom squad numbers ---
+  document.querySelectorAll('[data-num]').forEach(el => el.onclick = e => {
+    e.stopPropagation();
+    if (!canActFor(mid)) { toast(`That's ${managerName(mid)}'s squad numbering, not yours`); return; }
+    const pid = +el.dataset.num;
+    const cur2 = currentGwIndex();
+    const v = prompt(`Squad number for ${PLAYER_BY_ID[pid].name} (1–99):`, shirtNum(mid, pid));
+    if (v == null) return;
+    const n = Math.round(+v);
+    if (!n || n < 1 || n > 99) { toast('Numbers 1–99 only'); return; }
+    const clash = squadAt(mid, cur2).find(x => x.id !== pid && +shirtNum(mid, x.id) === n);
+    if (clash) { toast(`${n} is taken by ${clash.name}`); return; }
+    (state.shirtNums[mid] = state.shirtNums[mid] || {})[pid] = n;
+    pushShared(`shirtNums/${mid}`, state.shirtNums[mid]);
+    save(); render();
+    toast(`${PLAYER_BY_ID[pid].name} takes the number ${n} shirt`);
+  });
   // --- the Trough (one swap per manager per gameweek, no queue) ---
   const out = $('#trOut'), search = $('#trSearch'), results = $('#trResults');
   if (out) {
