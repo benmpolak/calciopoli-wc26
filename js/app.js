@@ -174,8 +174,9 @@ window.onSharedSnapshot = data => {
   if (state.settings.maxPerCountry == null) state.settings.maxPerCountry = 3;
   if (state.settings.maxPerCountryGroup == null) state.settings.maxPerCountryGroup = 1;
   save(); render();
-  if (fresh && !localStorage.getItem('wc26-ceremony-seen')) {
-    localStorage.setItem('wc26-ceremony-seen', '1');
+  const cerKey = state.draft.order.join('-');
+  if (fresh && cerKey && localStorage.getItem('wc26-ceremony-seen') !== cerKey) {
+    localStorage.setItem('wc26-ceremony-seen', cerKey);
     showCeremony();
   }
 };
@@ -915,7 +916,7 @@ function bindSetup() {
     state.view = 'draft';
     publishAll();
     save(); render();
-    localStorage.setItem('wc26-ceremony-seen', '1');
+    localStorage.setItem('wc26-ceremony-seen', state.draft.order.join('-'));
     showCeremony();
   };
 }
@@ -1071,12 +1072,14 @@ function maybeDrinksBreak() {
     <button class="btn" id="breakDone" style="margin-top:16px">Back to the Console</button></div>`;
   document.body.appendChild(el);
   $('#breakDone').onclick = () => {
-    state.draft.breaksDone = [...(state.draft.breaksDone || []), n];
-    pushShared('draft/breaksDone', state.draft.breaksDone);
+    // deadline first, then the break flag — same-client writes are ordered, so no
+    // device ever sees the break end while an expired clock is still in force
     if (state.settings.pickTimer) {
       state.draft.deadline = Date.now() + state.settings.pickTimer * 1000;
       pushShared('draft/deadline', state.draft.deadline);
     }
+    state.draft.breaksDone = [...(state.draft.breaksDone || []), n];
+    pushShared('draft/breaksDone', state.draft.breaksDone);
     save(); render();
   };
 }
@@ -1424,7 +1427,9 @@ function bindDraft() {
     clockTimer = setInterval(() => {
       const el = $('#pickClock');
       if (!el || state.phase !== 'draft') { clearInterval(clockTimer); return; }
-      if ($('#drinksBreak') || $('#ceremony')) return; // clock politely waits for pomp
+      const bn = pickNo();
+      const breakDue = drinksBreakAt(bn) && !(state.draft.breaksDone || []).includes(bn);
+      if (breakDue || $('#drinksBreak') || $('#ceremony')) return; // clock politely waits for pomp
       const left = Math.max(0, Math.round(((state.draft.deadline || 0) - Date.now()) / 1000));
       el.textContent = `${Math.floor(left / 60)}:${String(left % 60).padStart(2, '0')}`;
       el.classList.toggle('urgent', left <= 10);
@@ -1442,11 +1447,17 @@ function bindDraft() {
   bindPoolTable();
   $('#undoPick').onclick = () => {
     if (netOn() && !isCommissioner()) { toast('Only the commissioner can undo a pick'); return; }
+    const resetClock = () => {
+      if (state.settings.pickTimer) {
+        state.draft.deadline = Date.now() + state.settings.pickTimer * 1000;
+        pushShared('draft/deadline', state.draft.deadline);
+      }
+    };
     if (netOn()) {
       window.WCSync.txn('draft/picks', cur => { const a = toArr(cur); a.pop(); return a; })
-        .then(res => { state.draft.picks = toArr(res.snapshot.val()); save(); render(); });
+        .then(res => { state.draft.picks = toArr(res.snapshot.val()); resetClock(); save(); render(); });
     } else {
-      state.draft.picks.pop(); save(); render();
+      state.draft.picks.pop(); resetClock(); save(); render();
     }
   };
   $('#autoPick').onclick = autoPick;
