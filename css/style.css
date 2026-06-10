@@ -246,6 +246,27 @@ input:focus, select:focus { border-color: var(--accent-dim); }
   font-size: 13px; font-weight: 700; padding: 10px 16px;
 }
 .rules-p { font-size: 13.5px; line-height: 1.55; margin-bottom: 10px; color: var(--text); }
+.pundit-strip { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 12px; }
+.pundit-chip {
+  display: inline-flex; align-items: center; gap: 6px; font-size: 11px; font-weight: 700;
+  color: var(--muted); background: var(--card2); border: 1px solid var(--line);
+  padding: 3px 10px 3px 4px; border-radius: 99px;
+}
+.pundit-ava {
+  width: 28px; height: 28px; border-radius: 50%; background: var(--bg2);
+  display: inline-flex; align-items: center; justify-content: center; flex: none;
+  font-size: 11px; font-weight: 800; letter-spacing: .5px; color: #fff;
+  box-shadow: 0 0 0 1px rgba(255,255,255,.18), 0 2px 6px rgba(0,0,0,.4);
+}
+.pa-dp { background: linear-gradient(135deg, #28509e, #12275c); }   /* Sky studio blue */
+.pa-al { background: linear-gradient(135deg, #2d1c0e, #6b3d12); }   /* Guinness */
+.pa-jr { background: linear-gradient(135deg, #d9608c, #8c2f55); }   /* salmon shirt */
+.pa-am { background: linear-gradient(135deg, #1d6fb8, #123e6b); }   /* tartan-adjacent */
+.pundit-line { display: flex; gap: 10px; padding: 8px 0; border-bottom: 1px solid rgba(38,50,80,.4); font-size: 12.5px; }
+.pundit-line:last-child { border: none; }
+.pundit-line b { font-size: 11px; color: var(--accent); display: block; margin-bottom: 2px; }
+.pundit-line p { color: var(--text); line-height: 1.45; }
+
 .ceremony-name {
   font-size: 34px; font-weight: 800; color: var(--gold); padding: 14px 0;
   animation: cer-pop .4s ease;

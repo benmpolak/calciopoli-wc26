@@ -132,8 +132,17 @@ const toArr = x => Array.isArray(x) ? x : (x ? Object.values(x) : []);
 window.onSharedSnapshot = data => {
   if (SYNC_OFF || demoMode) return;
   if (!data) {
-    // cloud league is empty — publish if a game already started locally
-    if (state.phase !== 'setup') publishAll();
+    // cloud league is empty. Only the commissioner's device may repopulate it;
+    // everyone else treats empty cloud as the truth (so a deliberate reset sticks).
+    if (state.phase !== 'setup') {
+      if (isCommissioner()) {
+        publishAll();
+      } else {
+        state = freshState();
+        localStorage.removeItem('wc26-ceremony-seen');
+        save();
+      }
+    }
     render();
     return;
   }
@@ -703,6 +712,7 @@ function render() {
   }
   renderIdentity();
   maybeDrinksBreak();
+  broadcastOnPick();
   if (focusId) {
     const el = document.getElementById(focusId);
     if (el) {
@@ -757,7 +767,14 @@ function renderSyncArea() {
     const last = state.lastSync ? new Date(state.lastSync).toLocaleString('en-GB', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }) : 'never';
     bits.push(`<span>Last intercept: ${last}</span><button id="syncBtn" class="btn small">&#128222; Tap the lines</button>`);
   }
+  bits.push(`<button class="tag" id="muteBtn" style="cursor:pointer" title="Broadcast sound (Iain's mute button)">${soundOn() ? '&#128266;' : '&#128263;'}</button>`);
   el.innerHTML = bits.join('');
+  const mb = $('#muteBtn');
+  if (mb) mb.onclick = () => {
+    localStorage.setItem('wc26-mute', soundOn() ? '1' : '0');
+    renderSyncArea();
+    toast(soundOn() ? 'Broadcast sound on. Sorry, Iain.' : 'Broadcast muted. Iain wins this one.');
+  };
   const wb = $('#whoBtn');
   if (wb) wb.onclick = () => { whoami = null; localStorage.removeItem(WHO_KEY); render(); };
   const sb = $('#syncBtn');
@@ -836,7 +853,7 @@ function showCeremony() {
   const order = state.draft.order;
   if (!order.length) return;
   const steps = [
-    { h: '&#9917; THE OPENING CEREMONY', p: 'Please be upstanding for the parade of all 48 nations. Iain, you too. Especially you.' },
+    { h: '&#9917; THE OPENING CEREMONY', p: 'Live and exclusive coverage with David Pruttone, alongside Big Al Brazil, who has been here since the gallops. Please be upstanding for the parade of all 48 nations. Iain, you too. Especially you.' },
     { h: '&#127908; Main stage', p: 'Coldplay perform Viva la Vida in its 9-minute extended ceremony arrangement. Chris Martin has been told this is a four-man WhatsApp league. He says every league is beautiful.' },
     { h: '&#127930; The anthems', p: 'The stadium now rises for a full and unabridged rendition of North London Forever. Marc weeps openly. Iain has been located attempting to leave the venue. Stewards have returned him to his seat.', anthem: true },
     { h: '&#129309; The draw', p: 'Luciano Moggi shuffles the envelopes. The envelopes were sealed. The seals were his.' },
@@ -911,6 +928,129 @@ function maybeDrinksBreak() {
   };
 }
 
+/* ----- the punditry desk ----- */
+const PUNDITS = {
+  prutton: { name: 'David Pruttone', emoji: '&#127897;&#65039;', init: 'DP', cls: 'pa-dp' },
+  al: { name: 'Big Al Brazil', emoji: '&#127866;', init: 'AB', cls: 'pa-al' },
+  redknapp: { name: 'Jamie Redknappe', emoji: '&#128084;', init: 'JR', cls: 'pa-jr' },
+  coisty: { name: 'Ally McCoisty', emoji: '&#128516;', init: 'AM', cls: 'pa-am' },
+};
+function pundComment(pk) {
+  const p = PLAYER_BY_ID[pk.playerId];
+  const mgr = managerName(pk.managerId);
+  const seed = (pk.n * 2654435761 + pk.playerId * 97) >>> 0;
+  const pick = arr => arr[seed % arr.length];
+  const r = rating(p);
+  const sameCountry = managerSquad(pk.managerId).filter(x => x.team === p.team).length;
+  if (p.pos === 'GK' && pk.n <= state.managers.length * 2) {
+    return { who: 'al', line: `A goalkeeper?! At pick ${pk.n}?! Honestly. I need a coffee. And by coffee I obviously mean a Guinness.`, sound: 'trombone' };
+  }
+  if (sameCountry >= 3) {
+    return { who: 'prutton', line: `That's ${sameCountry} from ${p.team} for ${mgr}. Like a loan-heavy January window at Barnsley, that. I'm predicting 2-1, by the way. I always am.` };
+  }
+  if ((p.age || 0) >= 36) {
+    return { who: pick(['al', 'coisty']), line: pick([
+      `${p.name}, age ${p.age}? Great age. I won the UEFA Cup at that age. Twice, probably. Anyway, I'm off at half nine.`,
+      `I PLAYED AGAINST HIM! I genuinely think I played against him! Magnificent!`,
+    ]) };
+  }
+  if (r >= 28) {
+    return { who: pick(['redknapp', 'al', 'coisty']), line: pick([
+      `${p.name} is literally a Rolls Royce of a footballer. Literally. Top, top, TOP pick from ${mgr}.`,
+      `Top, top player. I had a word with his agent at Cheltenham — lovely fella, bought me a magnum of red. ${mgr}'s done well there.`,
+      `Oh I LOVE him! ${p.name}! Absolutely magnificent! What a pick, what a draft, what a MORNING!`,
+    ]), sound: 'cheer' };
+  }
+  if (r <= 8 && pk.n <= state.managers.length * 6) {
+    return { who: pick(['al', 'prutton', 'coisty']), line: pick([
+      `${p.name}? Never heard of him. And I've heard of EVERYONE. Give it a wide berth, ${mgr}.`,
+      `${p.name} at pick ${pk.n}. Shades of a wet Tuesday night at Rotherham about that one.`,
+      `${p.name}! Projected ${r} points! ${mgr}, you wee rascal, what are you DOING?!`,
+    ]), sound: 'trombone' };
+  }
+  return { who: pick(['prutton', 'al', 'redknapp', 'coisty']), line: pick([
+    `Tidy pick from ${mgr}. Honest. Hard-working. EFL-core. 2-1.`,
+    `${mgr} goes ${p.name}. Decent shout. Reminds me of a lad I roomed with at Ipswich. Different story for after the break.`,
+    `When ${p.name}'s on it, he's literally unplayable. Literally cannot be played. ${mgr} knows it.`,
+    `${p.name}, eh? We had him on the show once. Lovely fella. Ate all the biscuits.`,
+    `${p.name} of ${p.team}! Honest pro. Good feet. GREAT feet. Right — racing from Chepstow at ten.`,
+    `${p.name} at pick ${pk.n}. The Trough nods approvingly. Sticking with 2-1.`,
+  ]) };
+}
+function punditAva(pd) { return `<span class="pundit-ava ${pd.cls}" title="${pd.name}">${pd.init}</span>`; }
+function punditryDesk() {
+  const recent = [...state.draft.picks].slice(-3).reverse();
+  const lines = recent.length ? recent.map(pk => {
+    const c = pundComment(pk);
+    const pd = PUNDITS[c.who];
+    return `<div class="pundit-line">${punditAva(pd)}<div><b>${pd.name}</b><p>${esc(c.line)}</p></div></div>`;
+  }).join('') : `<div class="pundit-line">${punditAva(PUNDITS.prutton)}<div><b>${PUNDITS.prutton.name}</b><p>Welcome to draft night, live and exclusive. Alongside me: Big Al, who's been here since the gallops; Jamie, who has literally never been more excited; and Ally, who loves all 1,246 players equally. I'm predicting 2-1.</p></div></div>`;
+  return `<div class="card">
+    <h2>The Punditry Desk <span class="tag">LIVE on Sky Sports The Console</span></h2>
+    <div class="pundit-strip">${Object.values(PUNDITS).map(pd => `<span class="pundit-chip">${punditAva(pd)}${pd.name} ${pd.emoji}</span>`).join('')}</div>
+    ${lines}
+  </div>`;
+}
+
+/* ----- broadcast audio (synthesized, no files, Iain-mutable) ----- */
+let audioCtx = null;
+const soundOn = () => localStorage.getItem('wc26-mute') !== '1';
+function actx() {
+  audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)();
+  if (audioCtx.state === 'suspended') audioCtx.resume();
+  return audioCtx;
+}
+document.addEventListener('click', () => { try { actx(); } catch { /* no audio */ } }, { once: true });
+function tone(c, freq, at, dur, { type = 'triangle', gain = 0.07, slideTo = null } = {}) {
+  const o = c.createOscillator(), g = c.createGain();
+  o.type = type;
+  o.frequency.setValueAtTime(freq, c.currentTime + at);
+  if (slideTo) o.frequency.linearRampToValueAtTime(slideTo, c.currentTime + at + dur);
+  g.gain.setValueAtTime(0, c.currentTime + at);
+  g.gain.linearRampToValueAtTime(gain, c.currentTime + at + 0.02);
+  g.gain.exponentialRampToValueAtTime(0.001, c.currentTime + at + dur);
+  o.connect(g).connect(c.destination);
+  o.start(c.currentTime + at);
+  o.stop(c.currentTime + at + dur + 0.05);
+}
+function playSound(kind) {
+  if (!soundOn()) return;
+  try {
+    const c = actx();
+    if (kind === 'cheer') {
+      // crowd roar: filtered noise swell + triumphant notes
+      const len = c.sampleRate * 1.4;
+      const buf = c.createBuffer(1, len, c.sampleRate);
+      const d = buf.getChannelData(0);
+      for (let i = 0; i < len; i++) d[i] = (Math.random() * 2 - 1) * Math.min(i / (len * 0.3), 1 - i / len);
+      const src = c.createBufferSource(); src.buffer = buf;
+      const f = c.createBiquadFilter(); f.type = 'bandpass'; f.frequency.value = 900; f.Q.value = 0.6;
+      const g = c.createGain(); g.gain.value = 0.12;
+      src.connect(f).connect(g).connect(c.destination); src.start();
+      tone(c, 523, 0.1, 0.15); tone(c, 659, 0.25, 0.15); tone(c, 784, 0.4, 0.4, { gain: 0.09 });
+    } else if (kind === 'trombone') {
+      // the universal sound of a bad decision
+      tone(c, 466, 0, 0.25, { type: 'sawtooth', gain: 0.06, slideTo: 440 });
+      tone(c, 415, 0.28, 0.25, { type: 'sawtooth', gain: 0.06, slideTo: 392 });
+      tone(c, 370, 0.56, 0.25, { type: 'sawtooth', gain: 0.06, slideTo: 349 });
+      tone(c, 330, 0.84, 0.7, { type: 'sawtooth', gain: 0.07, slideTo: 233 });
+    } else {
+      // broadcast sting
+      tone(c, 523, 0, 0.09); tone(c, 659, 0.1, 0.09); tone(c, 784, 0.2, 0.16);
+    }
+  } catch { /* no audio available */ }
+}
+let seenPicks = null;
+function broadcastOnPick() {
+  const n = state.draft.picks.length;
+  if (seenPicks === null) { seenPicks = n; return; }
+  if (state.phase === 'draft' && n > seenPicks) {
+    const c = pundComment(state.draft.picks[n - 1]);
+    playSound(c.sound || 'sting');
+  }
+  seenPicks = n;
+}
+
 /* ----- the console (draft) ----- */
 let poolFilter = { q: '', team: '', pos: '', sort: 'rating', limit: 60 };
 
@@ -955,6 +1095,7 @@ function viewDraft() {
           <div class="srow"><span class="pos-badge pos-${p.pos}">${p.pos}</span>${flagImg(p.team)}<span>${esc(p.name)}</span></div>
         `).join('') || '<span class="muted">No picks yet</span>'}
       </div>
+      ${punditryDesk()}
       <div class="card">
         <h2>Pick history</h2>
         <div class="pick-log">
@@ -1511,6 +1652,7 @@ function bindSettings() {
     if (netOn() && !isCommissioner()) { toast('Only the commissioner can reset the league'); return; }
     if (confirm('Wipe the league, draft and all scores — for EVERYONE?')) {
       state = freshState();
+      localStorage.removeItem('wc26-ceremony-seen');
       if (netOn()) window.WCSync.setRoot(null);
       save(); render();
     }
