@@ -838,7 +838,7 @@ function showCeremony() {
   const steps = [
     { h: '&#9917; THE OPENING CEREMONY', p: 'Please be upstanding for the parade of all 48 nations. Iain, you too. Especially you.' },
     { h: '&#127908; Main stage', p: 'Coldplay perform Viva la Vida in its 9-minute extended ceremony arrangement. Chris Martin has been told this is a four-man WhatsApp league. He says every league is beautiful.' },
-    { h: '&#127930; The anthems', p: 'The stadium now rises for a full and unabridged rendition of North London Forever. Marc weeps openly. Iain has been located attempting to leave the venue. Stewards have returned him to his seat.' },
+    { h: '&#127930; The anthems', p: 'The stadium now rises for a full and unabridged rendition of North London Forever. Marc weeps openly. Iain has been located attempting to leave the venue. Stewards have returned him to his seat.', anthem: true },
     { h: '&#129309; The draw', p: 'Luciano Moggi shuffles the envelopes. The envelopes were sealed. The seals were his.' },
     ...[...order].reverse().map((mid, i) => ({
       h: `Drafting ${['fourth', 'third', 'second', 'FIRST'][i]}…`, p: managerName(mid), big: true,
@@ -849,17 +849,30 @@ function showCeremony() {
   const ov = document.createElement('div');
   ov.id = 'ceremony';
   ov.className = 'overlay';
+  ov.innerHTML = '<div id="cerStage" style="display:flex;flex-direction:column;align-items:center;gap:12px;width:92%;max-width:520px"><div id="cerCard" style="width:100%"></div></div>';
   document.body.appendChild(ov);
   const show = () => {
     if (i >= steps.length) { ov.remove(); return; }
     const s = steps[i];
-    ov.innerHTML = `<div class="card" style="max-width:520px;width:92%;text-align:center">
+    $('#cerCard').innerHTML = `<div class="card" style="text-align:center">
       <h2 style="margin-bottom:12px">${s.h}</h2>
       ${s.big ? `<div class="ceremony-name">${esc(s.p)}</div>` : `<p class="rules-p" style="text-align:center">${esc(s.p)}</p>`}
       <div style="margin-top:18px;display:flex;gap:8px;justify-content:center">
         <button class="btn small" id="cerNext">${i === steps.length - 1 ? 'To the Console' : 'Continue the pomp'}</button>
         <button class="btn ghost small" id="cerSkip" title="Reserved for Iain">Skip ceremony (Iain's button)</button>
       </div></div>`;
+    // the anthem takes the stage and plays on through the draw and the reveal
+    if (s.anthem && !$('#cerPlayer')) {
+      const player = document.createElement('div');
+      player.id = 'cerPlayer';
+      player.style.cssText = 'width:100%;border-radius:12px;overflow:hidden;box-shadow:var(--shadow)';
+      player.innerHTML = `<iframe width="100%" height="200" style="display:block;border:0"
+        src="https://www.youtube-nocookie.com/embed/wjCJv4W4kvw?autoplay=1&rel=0&playsinline=1"
+        title="Louis Dunford — The Angel (North London Forever)"
+        allow="autoplay; encrypted-media" allowfullscreen></iframe>
+        <div style="background:var(--card2);font-size:11px;color:var(--muted);padding:6px 10px;text-align:center">Louis Dunford &mdash; The Angel (North London Forever). If your phone blocks autoplay, tap play. Iain: volume stays up.</div>`;
+      $('#cerStage').appendChild(player);
+    }
     $('#cerNext').onclick = () => { i++; show(); };
     $('#cerSkip').onclick = () => { ov.remove(); toast('Ceremony skipped. Iain nods, once.'); };
   };
