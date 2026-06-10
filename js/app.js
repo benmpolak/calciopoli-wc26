@@ -78,7 +78,8 @@ const GAMEWEEKS = [
   { n: 4, label: 'Round of 32', to: '2026-07-04T09:00Z' },
   { n: 5, label: 'Round of 16', to: '2026-07-08T09:00Z' },
   { n: 6, label: 'Quarter-finals', to: '2026-07-12T09:00Z' },
-  { n: 7, label: 'Semis & Final', to: '2026-07-20T12:00Z' },
+  { n: 7, label: 'Semi-finals', to: '2026-07-17T09:00Z' },
+  { n: 8, label: 'Bronze Final & Final', to: '2026-07-20T12:00Z' },
 ];
 const gwFrom = i => i === 0 ? '2026-06-11T00:00Z' : GAMEWEEKS[i - 1].to;
 const inGw = (dateIso, i) => {
@@ -140,6 +141,9 @@ window.onSharedSnapshot = data => {
   data.draft = data.draft || {};
   data.draft.order = toArr(data.draft.order);
   data.draft.picks = toArr(data.draft.picks);
+  data.draft.breaksDone = toArr(data.draft.breaksDone);
+  // first sight of a fresh draft on this device → roll the opening ceremony
+  const fresh = data.phase === 'draft' && data.draft.picks.length === 0;
   data.transfers = toArr(data.transfers);
   data.lineups = data.lineups || {};
   for (const mid of Object.keys(data.lineups)) {
@@ -153,6 +157,10 @@ window.onSharedSnapshot = data => {
   for (const k of SHARED_KEYS) if (data[k] !== undefined) state[k] = data[k];
   if (state.settings.maxPerCountry == null) state.settings.maxPerCountry = 3;
   save(); render();
+  if (fresh && !localStorage.getItem('wc26-ceremony-seen')) {
+    localStorage.setItem('wc26-ceremony-seen', '1');
+    showCeremony();
+  }
 };
 window.onSyncConnection = up => { syncConnected = up; renderSyncArea(); };
 
@@ -163,12 +171,12 @@ function freshState() {
       { id: 1, name: 'Ben Polak' }, { id: 2, name: 'Mrc Cnwy' }, { id: 3, name: 'Iain Tussie' }, { id: 4, name: 'Rick Blank' },
     ],
     settings: {
-      squadSize: 15,
-      quotas: { GK: 2, DF: 5, MF: 5, FW: 3 },
-      maxPerCountry: 3,
+      squadSize: 23,
+      quotas: { GK: 3, DF: 7, MF: 7, FW: 6 },
+      maxPerCountry: 4,
       scoring: { ...DEFAULT_SCORING },
     },
-    draft: { order: [], picks: [] },
+    draft: { order: [], picks: [], breaksDone: [] },
     lineups: {},           // managerId -> { gwIndex: [pid x11] }
     transfers: [],         // [{managerId, outId, inId, gw, n, trade?}]
     waivers: {},           // gwIndex -> { actions: [{mid, outId?, inId?, pass?}] }
@@ -196,7 +204,8 @@ function buildDemoState() {
   const counts = {}, nations = {};
   s.managers.forEach(m => { counts[m.id] = { GK: 0, DF: 0, MF: 0, FW: 0 }; nations[m.id] = {}; });
   const q = s.settings.quotas, maxC = s.settings.maxPerCountry;
-  for (let n = 0; n < 60; n++) {
+  const totalDemoPicks = s.settings.squadSize * s.managers.length;
+  for (let n = 0; n < totalDemoPicks; n++) {
     const m = 4, round = Math.floor(n / m), idx = n % m;
     const mid = round % 2 === 0 ? s.draft.order[idx] : s.draft.order[m - 1 - idx];
     const p = sorted.find(p => !taken.has(p.id) && counts[mid][p.pos] < q[p.pos] && (nations[mid][p.team] || 0) < maxC);
@@ -294,15 +303,9 @@ function ownedIdsAt(gwIdx) {
 function countryCount(squad, team) { return squad.filter(p => p.team === team).length; }
 
 /* ---------------- gameweek waiver draft ---------------- */
-function waiverOrder(gwIdx) {
-  const anyFinal = GAMEWEEKS.some((g, i) => i < gwIdx && gwStatus(i) === 'final');
-  const base = anyFinal ? h2hStandings().map(r => r.id) : [...state.draft.order];
-  return [...base].reverse(); // bottom feeds first
-}
-function waiverState(gwIdx) {
-  const actions = state.waivers?.[gwIdx]?.actions || [];
-  const order = waiverOrder(gwIdx);
-  return { order, actions, turnMid: order[actions.length] ?? null, complete: actions.length >= order.length };
+// the Trough: one free-agent swap per manager per gameweek, no queue, no ceremony
+function troughUsed(mid, gwIdx) {
+  return (state.waivers?.[gwIdx]?.actions || []).some(a => a.mid === mid);
 }
 
 /* ---------------- draft logic ---------------- */
@@ -699,6 +702,7 @@ function render() {
     default: state.view = 'draft'; render();
   }
   renderIdentity();
+  maybeDrinksBreak();
   if (focusId) {
     const el = document.getElementById(focusId);
     if (el) {
@@ -800,7 +804,7 @@ function bindSetup() {
     const q = state.settings.quotas;
     const total = q.GK + q.DF + q.MF + q.FW;
     state.settings.squadSize = total;
-    $('#setupTotal').innerHTML = `Squad size: <b>${total}</b> each &middot; <b>${total * state.managers.length}</b> of ${PLAYERS.length} players drafted &middot; starting XI picked each gameweek &middot; weekly waiver draft, bottom first`;
+    $('#setupTotal').innerHTML = `Squad size: <b>${total}</b> each &middot; <b>${total * state.managers.length}</b> of ${PLAYERS.length} players drafted &middot; starting XI picked each gameweek &middot; one Trough swap each per gameweek`;
   };
   document.querySelectorAll('[data-mgr]').forEach(inp => inp.oninput = () => {
     state.managers.find(m => m.id === +inp.dataset.mgr).name = inp.value;
@@ -821,7 +825,76 @@ function bindSetup() {
     state.view = 'draft';
     publishAll();
     save(); render();
-    toast(`Draft order: ${state.draft.order.map(managerName).join(' → ')}`);
+    localStorage.setItem('wc26-ceremony-seen', '1');
+    showCeremony();
+  };
+}
+
+/* ----- opening ceremony (requested by Marc, dedicated to Iain) ----- */
+function showCeremony() {
+  if ($('#ceremony')) return;
+  const order = state.draft.order;
+  if (!order.length) return;
+  const steps = [
+    { h: '&#9917; THE OPENING CEREMONY', p: 'Please be upstanding for the parade of all 48 nations. Iain, you too. Especially you.' },
+    { h: '&#127908; Main stage', p: 'Coldplay perform Viva la Vida in its 9-minute extended ceremony arrangement. Chris Martin has been told this is a four-man WhatsApp league. He says every league is beautiful.' },
+    { h: '&#127930; The anthems', p: 'The stadium now rises for a full and unabridged rendition of North London Forever. Marc weeps openly. Iain has been located attempting to leave the venue. Stewards have returned him to his seat.' },
+    { h: '&#129309; The draw', p: 'Luciano Moggi shuffles the envelopes. The envelopes were sealed. The seals were his.' },
+    ...[...order].reverse().map((mid, i) => ({
+      h: `Drafting ${['fourth', 'third', 'second', 'FIRST'][i]}…`, p: managerName(mid), big: true,
+    })),
+    { h: 'LET THE DRAFT BEGIN', p: `${managerName(order[0])} is on the clock. The phones are not tapped. Allegedly.` },
+  ];
+  let i = 0;
+  const ov = document.createElement('div');
+  ov.id = 'ceremony';
+  ov.className = 'overlay';
+  document.body.appendChild(ov);
+  const show = () => {
+    if (i >= steps.length) { ov.remove(); return; }
+    const s = steps[i];
+    ov.innerHTML = `<div class="card" style="max-width:520px;width:92%;text-align:center">
+      <h2 style="margin-bottom:12px">${s.h}</h2>
+      ${s.big ? `<div class="ceremony-name">${esc(s.p)}</div>` : `<p class="rules-p" style="text-align:center">${esc(s.p)}</p>`}
+      <div style="margin-top:18px;display:flex;gap:8px;justify-content:center">
+        <button class="btn small" id="cerNext">${i === steps.length - 1 ? 'To the Console' : 'Continue the pomp'}</button>
+        <button class="btn ghost small" id="cerSkip" title="Reserved for Iain">Skip ceremony (Iain's button)</button>
+      </div></div>`;
+    $('#cerNext').onclick = () => { i++; show(); };
+    $('#cerSkip').onclick = () => { ov.remove(); toast('Ceremony skipped. Iain nods, once.'); };
+  };
+  show();
+}
+
+/* ----- drinks breaks (mandatory, per Marc; non-negotiable, per Iain's objections) ----- */
+const DRINKS_COPY = [
+  'FIRST DRINKS BREAK — a third of the way. Hydrate. Moggi is having a Negroni with a man he has never officially met.',
+  'SECOND DRINKS BREAK — two thirds done. Stretch the legs. Iain: this break is contractually mandatory and was added specifically because of you.',
+];
+function drinksBreakAt(n) {
+  const t = totalPicks();
+  if (n === Math.round(t / 3)) return DRINKS_COPY[0];
+  if (n === Math.round(2 * t / 3)) return DRINKS_COPY[1];
+  return null;
+}
+function maybeDrinksBreak() {
+  const ov = $('#drinksBreak');
+  const n = pickNo();
+  const due = state.phase === 'draft' && drinksBreakAt(n) && !(state.draft.breaksDone || []).includes(n);
+  if (!due) { ov?.remove(); return; }
+  if (ov) return;
+  const el = document.createElement('div');
+  el.id = 'drinksBreak';
+  el.className = 'overlay';
+  el.innerHTML = `<div class="card" style="max-width:480px;width:92%;text-align:center">
+    <div style="font-size:46px;margin-bottom:8px">&#127866;</div>
+    <h2>${drinksBreakAt(n)}</h2>
+    <button class="btn" id="breakDone" style="margin-top:16px">Back to the Console</button></div>`;
+  document.body.appendChild(el);
+  $('#breakDone').onclick = () => {
+    state.draft.breaksDone = [...(state.draft.breaksDone || []), n];
+    pushShared('draft/breaksDone', state.draft.breaksDone);
+    save(); render();
   };
 }
 
@@ -1005,7 +1078,7 @@ function viewTeam() {
   const locked = gwIsOver(gw);
   const cur = currentGwIndex();
   const ownedNow = ownedIdsAt(cur);
-  const wv = waiverState(cur);
+  const swapUsed = troughUsed(mid, cur);
 
   const countsBar = ['GK', 'DF', 'MF', 'FW'].map(pos => {
     const [lo, hi] = XI_RULES[pos];
@@ -1041,24 +1114,19 @@ function viewTeam() {
     </div>
     <div class="draft-side">
       <div class="card">
-        <h2>GW${GAMEWEEKS[cur].n} Waiver Draft</h2>
-        <p class="muted" style="font-size:12px;margin-bottom:10px">One swap each per gameweek from the Trough. Bottom of the table feeds first.</p>
-        <div class="order-strip" style="margin-bottom:10px">
-          ${wv.order.map((wmid, i) => {
-            const cls = i < wv.actions.length ? 'done' : (wmid === wv.turnMid ? 'now' : '');
-            return `<span class="order-chip ${cls}">${esc(managerName(wmid))}</span>`;
-          }).join('<span class="muted" style="align-self:center">›</span>')}
+        <h2>The Trough <span class="tag">GW${GAMEWEEKS[cur].n}</span></h2>
+        <p class="muted" style="font-size:12px;margin-bottom:10px">One swap per manager per gameweek — drop anyone, sign any free agent. No queue, no ceremony. You're welcome, Iain.</p>
+        <div class="quota-bar" style="margin-bottom:10px">
+          ${state.managers.map(m => `<span class="quota-pill ${troughUsed(m.id, cur) ? 'full' : ''}">${esc(m.name)} ${troughUsed(m.id, cur) ? '✓ fed' : '—'}</span>`).join('')}
         </div>
-        ${wv.complete ? `<p class="muted" style="font-size:12.5px">Waiver round complete. The Trough reopens next gameweek.</p>`
-        : !canActFor(wv.turnMid) ? `<p class="muted" style="font-size:12.5px"><b style="color:var(--text)">${esc(managerName(wv.turnMid))}</b> is at the Trough. Lean on them in the group chat.</p>` : `
-        <p style="font-size:13px;margin-bottom:8px"><b>${esc(managerName(wv.turnMid))}</b> is at the Trough</p>
+        ${swapUsed ? `<p class="muted" style="font-size:12.5px">${esc(managerName(mid))} has fed this gameweek. The Trough reopens GW${GAMEWEEKS[Math.min(cur + 1, GAMEWEEKS.length - 1)].n}.</p>`
+        : !canActFor(mid) ? `<p class="muted" style="font-size:12.5px">That's ${esc(managerName(mid))}'s swap, not yours.</p>` : `
         <select id="trOut" style="width:100%;margin-bottom:8px">
           <option value="">Player out…</option>
-          ${squadAt(wv.turnMid, cur).sort((a, b) => POS_ORDER[a.pos] - POS_ORDER[b.pos]).map(p => `<option value="${p.id}" ${teamView.transferOut === p.id ? 'selected' : ''}>${p.pos} — ${esc(p.name)} (${esc(p.team)})</option>`).join('')}
+          ${squadAt(mid, cur).sort((a, b) => POS_ORDER[a.pos] - POS_ORDER[b.pos]).map(p => `<option value="${p.id}" ${teamView.transferOut === p.id ? 'selected' : ''}>${p.pos} — ${esc(p.name)} (${esc(p.team)})</option>`).join('')}
         </select>
         <input type="text" id="trSearch" placeholder="Search the Trough — ${PLAYERS.length - ownedNow.size} players sniffing about…" style="width:100%;margin-bottom:8px">
-        <div id="trResults" class="pick-log"></div>
-        <button class="btn ghost small" id="trPass" style="margin-top:8px">Pass — nothing in the Trough for me</button>`}
+        <div id="trResults" class="pick-log"></div>`}
         <h3 style="margin-top:16px">Transfer log</h3>
         ${state.transfers.filter(t => t.managerId === mid).map(t =>
           `<div class="lrow" style="font-size:12.5px;padding:3px 0"><span class="muted">GW${GAMEWEEKS[t.gw].n}${t.trade ? ' ↔' : ''}</span> ${esc(PLAYER_BY_ID[t.outId].name)} <span class="muted">→</span> <b>${esc(PLAYER_BY_ID[t.inId].name)}</b></div>`).join('') || '<span class="muted" style="font-size:12.5px">None yet.</span>'}
@@ -1104,47 +1172,39 @@ function bindTeam() {
       save(); render();
     });
   }
-  // --- waiver draft ---
-  const out = $('#trOut'), search = $('#trSearch'), results = $('#trResults'), pass = $('#trPass');
+  // --- the Trough (one swap per manager per gameweek, no queue) ---
+  const out = $('#trOut'), search = $('#trSearch'), results = $('#trResults');
   if (out) {
     const cur = currentGwIndex();
-    const wv = waiverState(cur);
-    const wmid = wv.turnMid;
     out.onchange = () => { teamView.transferOut = +out.value || null; renderTrResults(); };
     search.oninput = renderTrResults;
-    pass.onclick = () => {
-      if (!canActFor(wmid)) { toast(`It's ${managerName(wmid)}'s turn at the Trough`); return; }
-      (state.waivers[cur] = state.waivers[cur] || { actions: [] }).actions.push({ mid: wmid, pass: true });
-      pushShared(`waivers/${cur}/actions`, state.waivers[cur].actions);
-      save(); render();
-      toast(`${managerName(wmid)} passes. The Trough remains untroubled.`);
-    };
     function renderTrResults() {
       const q = normName(search.value || '');
       if (!teamView.transferOut) { results.innerHTML = '<span class="muted" style="font-size:12.5px">Pick who goes out first, then raid the Trough.</span>'; return; }
       const owned = ownedIdsAt(cur);
       const outP = PLAYER_BY_ID[teamView.transferOut];
-      const squadAfterOut = squadAt(wmid, cur).filter(p => p.id !== outP.id);
+      const squadAfterOut = squadAt(mid, cur).filter(p => p.id !== outP.id);
       let pool = PLAYERS.filter(p => !owned.has(p.id));
       if (q) pool = pool.filter(p => normName(p.name).includes(q) || normName(p.team).includes(q));
-      pool.sort((a, b) => (b.goals * 3 + b.caps) - (a.goals * 3 + a.caps));
+      pool.sort((a, b) => rating(b) - rating(a));
       results.innerHTML = pool.slice(0, 15).map(p => {
-        const posOk = p.pos === outP.pos || posCount(wmid)[p.pos] < state.settings.quotas[p.pos] + (p.pos === outP.pos ? 1 : 0);
+        const posOk = p.pos === outP.pos || posCount(mid)[p.pos] < state.settings.quotas[p.pos];
         const countryOk = countryCount(squadAfterOut, p.team) < state.settings.maxPerCountry;
         const ok = posOk && countryOk;
         return `<div class="lrow"><span class="pos-badge pos-${p.pos}">${p.pos}</span>${flagImg(p.team)} ${esc(p.name)} <span class="muted" style="font-size:11px">${esc(p.team)}</span>
          <button class="btn small" style="margin-left:auto" data-trin="${p.id}" ${ok ? '' : `disabled title="${countryOk ? 'Position quota full' : 'Country limit reached'}"`}>Sign</button></div>`;
       }).join('') || '<span class="muted">The Trough is empty. Somehow.</span>';
       results.querySelectorAll('[data-trin]').forEach(b => b.onclick = () => {
-        if (!canActFor(wmid)) { toast(`It's ${managerName(wmid)}'s turn at the Trough`); return; }
+        if (!canActFor(mid)) { toast(`That's ${managerName(mid)}'s swap, not yours`); return; }
+        if (troughUsed(mid, cur)) { toast('Swap already used this gameweek'); return; }
         const inId = +b.dataset.trin, outId = teamView.transferOut;
-        state.transfers.push({ managerId: wmid, outId, inId, gw: cur, n: state.transfers.length + 1 });
-        (state.waivers[cur] = state.waivers[cur] || { actions: [] }).actions.push({ mid: wmid, outId, inId });
-        const lu = state.lineups[wmid]?.[cur];
-        if (lu) state.lineups[wmid][cur] = lu.filter(id => id !== outId);
+        state.transfers.push({ managerId: mid, outId, inId, gw: cur, n: state.transfers.length + 1 });
+        (state.waivers[cur] = state.waivers[cur] || { actions: [] }).actions.push({ mid, outId, inId });
+        const lu = state.lineups[mid]?.[cur];
+        if (lu) state.lineups[mid][cur] = lu.filter(id => id !== outId);
         pushShared('transfers', state.transfers);
         pushShared(`waivers/${cur}/actions`, state.waivers[cur].actions);
-        if (state.lineups[wmid]?.[cur]) pushShared(`lineups/${wmid}/${cur}`, state.lineups[wmid][cur]);
+        if (state.lineups[mid]?.[cur]) pushShared(`lineups/${mid}/${cur}`, state.lineups[mid][cur]);
         teamView.transferOut = null;
         save(); render();
         toast(`${PLAYER_BY_ID[inId].name} signed from the Trough. Moggi handled the paperwork.`);
@@ -1346,7 +1406,7 @@ function viewRules() {
       <h2>Head-to-head</h2>
       <p class="rules-p">Each gameweek you face one rival — your starters' points vs theirs. <b>Win 3, draw 1, loss 0.</b> Pairings rotate so everyone plays everyone. Tiebreak: overall points.</p>
       <h2 style="margin-top:18px">The Trough &amp; trades</h2>
-      <p class="rules-p"><b>Waiver draft:</b> every gameweek, one swap each from the Trough (all undrafted players). <b>Bottom of the table feeds first.</b> Pass if nothing tempts you.</p>
+      <p class="rules-p"><b>The Trough:</b> one swap per manager per gameweek — drop anyone, sign any undrafted player, whenever you like. First come, first served.</p>
       <p class="rules-p"><b>Trades:</b> player-for-player swaps between managers, any time, agreed in the group. Doesn't use your waiver turn.</p>
       <h2 style="margin-top:18px">The small print</h2>
       <p class="rules-p"><b>Proj. pts</b> in the Console is each player's projected tournament points — how far the bookies think his nation goes, how likely he is to start, and his international scoring record. A guide, not a guarantee. Moggi accepts no liability.</p>

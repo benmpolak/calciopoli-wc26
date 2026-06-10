@@ -28,14 +28,15 @@ const check = (label, ok, detail = '') => {
   // ---------- 2. country limit enforced ----------
   const limitOk = await p.evaluate(() => {
     const mid = currentManagerId();
-    const france = PLAYERS.filter(pl => pl.team === 'France').slice(0, 4);
-    // simulate 3 france players in squad then test 4th via canPick
-    state.draft.picks.push(...france.slice(0, 3).map((pl, i) => ({ managerId: mid, playerId: pl.id, n: i + 1 })));
-    const blocked = !canPick(mid, france[3]);
+    const max = state.settings.maxPerCountry;
+    const france = PLAYERS.filter(pl => pl.team === 'France').slice(0, max + 1);
+    // fill to the country limit then test one more via canPick
+    state.draft.picks.push(...france.slice(0, max).map((pl, i) => ({ managerId: mid, playerId: pl.id, n: i + 1 })));
+    const blocked = !canPick(mid, france[max]);
     state.draft.picks = [];
     return blocked;
   });
-  check('country limit blocks 4th player from same nation', limitOk);
+  check('country limit blocks one-over-the-max from same nation', limitOk);
 
   // ---------- 3. run the full 60-pick draft (engine path) ----------
   await p.evaluate(() => {
@@ -62,14 +63,14 @@ const check = (label, ok, detail = '') => {
     }
     return out;
   });
-  check('all squads have 15', draftAudit.squads.every(n => n === 15), JSON.stringify(draftAudit.squads));
-  check('position quotas exact (2/5/5/3)', draftAudit.quotaOk);
+  check('all squads have 23', draftAudit.squads.every(n => n === 23), JSON.stringify(draftAudit.squads));
+  check('position quotas exact (3/7/7/6)', draftAudit.quotaOk);
   check('country limit respected in full draft', draftAudit.countryOk);
   check('phase flips to season', await p.evaluate(() => state.phase === 'season'));
 
   // ---------- 4. simulate each gameweek ----------
-  const GW_NOW = ['2026-06-14', '2026-06-20', '2026-06-25', '2026-06-30', '2026-07-05', '2026-07-10', '2026-07-16'];
-  for (let gw = 0; gw < 7; gw++) {
+  const GW_NOW = ['2026-06-14', '2026-06-20', '2026-06-25', '2026-06-30', '2026-07-05', '2026-07-10', '2026-07-14', '2026-07-18'];
+  for (let gw = 0; gw < 8; gw++) {
     await p.evaluate((gw, nowStr) => {
       Date.now = () => new Date(nowStr + 'T12:00Z').getTime();
       // fabricate results for this GW for all owned players
@@ -93,22 +94,19 @@ const check = (label, ok, detail = '') => {
       save(); render();
     }, gw, GW_NOW[gw]);
 
-    // waiver round: every manager swaps or passes, in waiver order
+    // trough: each manager makes (at most) one open swap, any order
     const waiverResult = await p.evaluate(gw => {
       const cur = currentGwIndex();
       if (cur !== gw) return { err: `currentGwIndex ${cur} != ${gw}` };
-      const order = waiverOrder(cur);
       const did = [];
-      for (const wmid of order) {
-        const wv = waiverState(cur);
-        if (wv.turnMid !== wmid) return { err: 'turn order broken' };
+      for (const m of [...state.managers].reverse()) {
+        const wmid = m.id;
+        if (troughUsed(wmid, cur)) return { err: 'trough flag set before swap' };
         const squad = squadAt(wmid, cur);
-        // drop lowest-rated player, sign best legal trough player
         const out = [...squad].sort((a, b) => rating(a) - rating(b))[0];
         const owned = ownedIdsAt(cur);
         const after = squad.filter(x => x.id !== out.id);
-        const cand = PLAYERS.filter(x => !owned.has(x.id)
-          && (x.pos === out.pos)
+        const cand = PLAYERS.filter(x => !owned.has(x.id) && x.pos === out.pos
           && countryCount(after, x.team) < state.settings.maxPerCountry)
           .sort((a, b) => rating(b) - rating(a))[0];
         if (cand && Math.random() > 0.25) {
@@ -116,29 +114,26 @@ const check = (label, ok, detail = '') => {
           (state.waivers[cur] = state.waivers[cur] || { actions: [] }).actions.push({ mid: wmid, outId: out.id, inId: cand.id });
           const lu = state.lineups[wmid]?.[cur];
           if (lu) state.lineups[wmid][cur] = lu.filter(id => id !== out.id);
+          if (!troughUsed(wmid, cur)) return { err: 'troughUsed not set after swap' };
           did.push('swap');
-        } else {
-          (state.waivers[cur] = state.waivers[cur] || { actions: [] }).actions.push({ mid: wmid, pass: true });
-          did.push('pass');
-        }
+        } else did.push('skip');
       }
-      const complete = waiverState(cur).complete;
       save(); render();
-      return { did, complete };
+      return { did };
     }, gw);
-    check(`GW${gw + 1} waiver round completes`, waiverResult.complete === true, JSON.stringify(waiverResult.did || waiverResult.err));
+    check(`GW${gw + 1} trough swaps apply, one each`, !waiverResult.err && waiverResult.did.length === 4, JSON.stringify(waiverResult.did || waiverResult.err));
 
     // squads still legal after waivers
     const legal = await p.evaluate(() => {
       for (const m of state.managers) {
-        if (managerSquad(m.id).length !== 15) return false;
+        if (managerSquad(m.id).length !== state.settings.squadSize) return false;
         const nat = {};
         managerSquad(m.id).forEach(pl => nat[pl.team] = (nat[pl.team] || 0) + 1);
         if (Object.values(nat).some(n => n > state.settings.maxPerCountry)) return false;
       }
       return true;
     });
-    check(`GW${gw + 1} squads legal after waivers`, legal);
+    check(`GW${gw + 1} squads legal after trough swaps`, legal);
   }
 
   // ---------- 5. auto-sub: engineered case ----------
@@ -178,11 +173,20 @@ const check = (label, ok, detail = '') => {
     const mine = document.querySelector('#tradeMine'), theirs = document.querySelector('#tradeTheirs');
     // find same-position pair to avoid quota complications
     const myOpts = [...mine.options].slice(1), thOpts = [...theirs.options].slice(1);
+    const cur0 = currentGwIndex();
     let pair = null;
     for (const mo of myOpts) {
       const mp = PLAYER_BY_ID[+mo.value];
-      const to = thOpts.find(t => PLAYER_BY_ID[+t.value].pos === mp.pos);
-      if (to) { pair = [mo.value, to.value]; break; }
+      for (const to of thOpts) {
+        const tp = PLAYER_BY_ID[+to.value];
+        if (tp.pos !== mp.pos) continue;
+        const aAfter = squadAt(mid, cur0).filter(x => x.id !== mp.id);
+        const bAfter = squadAt(other, cur0).filter(x => x.id !== tp.id);
+        if (countryCount(aAfter, tp.team) >= state.settings.maxPerCountry) continue;
+        if (countryCount(bAfter, mp.team) >= state.settings.maxPerCountry) continue;
+        pair = [mo.value, to.value]; break;
+      }
+      if (pair) break;
     }
     if (!pair) return { skip: true };
     mine.value = pair[0]; theirs.value = pair[1];
@@ -202,11 +206,11 @@ const check = (label, ok, detail = '') => {
     const st = h2hStandings();
     const statuses = GAMEWEEKS.map((g, i) => gwStatus(i));
     const totals = state.managers.map(m => ({ name: m.name, pts: managerPoints(m.id) }));
-    const sane = st.every(r => r.p === 7 && r.w + r.d + r.l === r.p && r.pts === 3 * r.w + r.d);
+    const sane = st.every(r => r.p === 8 && r.w + r.d + r.l === r.p && r.pts === 3 * r.w + r.d);
     return { statuses, table: st.map(r => `${r.name} P${r.p} W${r.w} D${r.d} L${r.l} = ${r.pts}`), totals, sane };
   });
-  check('all 7 gameweeks final', finals.statuses.every(s => s === 'final'), finals.statuses.join(','));
-  check('H2H table arithmetic sane (P=7, pts=3W+D)', finals.sane, finals.table.join(' | '));
+  check('all 8 gameweeks final', finals.statuses.every(s => s === 'final'), finals.statuses.join(','));
+  check('H2H table arithmetic sane (P=8, pts=3W+D)', finals.sane, finals.table.join(' | '));
   check('overall points positive for all', finals.totals.every(t => t.pts > 0), JSON.stringify(finals.totals));
 
   // ---------- 8. every view renders without errors at season end ----------

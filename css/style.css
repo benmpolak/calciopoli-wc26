@@ -246,6 +246,11 @@ input:focus, select:focus { border-color: var(--accent-dim); }
   font-size: 13px; font-weight: 700; padding: 10px 16px;
 }
 .rules-p { font-size: 13.5px; line-height: 1.55; margin-bottom: 10px; color: var(--text); }
+.ceremony-name {
+  font-size: 34px; font-weight: 800; color: var(--gold); padding: 14px 0;
+  animation: cer-pop .4s ease;
+}
+@keyframes cer-pop { from { transform: scale(.6); opacity: 0; } to { transform: scale(1); opacity: 1; } }
 .rules-p b { color: var(--accent); }
 
 /* ---------- toast ---------- */
