@@ -172,6 +172,7 @@ window.onSharedSnapshot = data => {
   data.playerMap = data.playerMap || {};
   for (const k of SHARED_KEYS) if (data[k] !== undefined) state[k] = data[k];
   if (state.settings.maxPerCountry == null) state.settings.maxPerCountry = 3;
+  if (state.settings.maxPerCountryGroup == null) state.settings.maxPerCountryGroup = 1;
   save(); render();
   if (fresh && !localStorage.getItem('wc26-ceremony-seen')) {
     localStorage.setItem('wc26-ceremony-seen', '1');
@@ -189,7 +190,8 @@ function freshState() {
     settings: {
       squadSize: 23,
       quotas: { GK: 3, DF: 7, MF: 7, FW: 6 },
-      maxPerCountry: 4,
+      maxPerCountry: 4,      // cap from the round of 32
+      maxPerCountryGroup: 1, // cap through the draft and group stage
       pickTimer: 30,
       scoring: { ...DEFAULT_SCORING },
     },
@@ -221,7 +223,7 @@ function buildDemoState() {
   const taken = new Set();
   const counts = {}, nations = {};
   s.managers.forEach(m => { counts[m.id] = { GK: 0, DF: 0, MF: 0, FW: 0 }; nations[m.id] = {}; });
-  const q = s.settings.quotas, maxC = s.settings.maxPerCountry;
+  const q = s.settings.quotas, maxC = s.settings.maxPerCountryGroup;
   const totalDemoPicks = s.settings.squadSize * s.managers.length;
   for (let n = 0; n < totalDemoPicks; n++) {
     const m = 4, round = Math.floor(n / m), idx = n % m;
@@ -274,6 +276,7 @@ function load() {
     if (s && !s.shirtNums) s.shirtNums = {};
     if (s && s.settings.maxPerCountry == null) s.settings.maxPerCountry = 3;
     if (s && s.settings.pickTimer == null) s.settings.pickTimer = 0;
+    if (s && s.settings.maxPerCountryGroup == null) s.settings.maxPerCountryGroup = 1;
     return s;
   } catch { return null; }
 }
@@ -321,6 +324,10 @@ function ownedIdsAt(gwIdx) {
   return ids;
 }
 function countryCount(squad, team) { return squad.filter(p => p.team === team).length; }
+// 1 per country through the group stage; up to 4 once the knockouts begin
+function countryCapNow(gwIdx) {
+  return gwIdx >= 3 ? state.settings.maxPerCountry : state.settings.maxPerCountryGroup;
+}
 function shirtNum(mid, pid) {
   return state.shirtNums?.[mid]?.[pid] ?? PLAYER_BY_ID[pid].no ?? '–';
 }
@@ -344,7 +351,7 @@ function currentManagerId() {
 function canPick(mid, player) {
   const q = state.settings.quotas;
   if (posCount(mid)[player.pos] >= q[player.pos]) return false;
-  return countryCount(managerSquad(mid), player.team) < state.settings.maxPerCountry;
+  return countryCount(managerSquad(mid), player.team) < state.settings.maxPerCountryGroup;
 }
 function draftedIds() { return new Set(state.draft.picks.map(p => p.playerId)); }
 
@@ -825,8 +832,10 @@ function viewSetup() {
           <input type="number" min="0" max="11" data-quota="${pos}" value="${q[pos]}"></div>`).join('')}
       </div>
       <div style="margin-top:12px;display:flex;align-items:center;gap:10px;flex-wrap:wrap">
-        <label style="font-size:12px;color:var(--muted);font-weight:700">MAX PLAYERS PER COUNTRY</label>
-        <input type="number" min="1" max="26" id="maxCountry" value="${state.settings.maxPerCountry}" style="width:70px">
+        <label style="font-size:12px;color:var(--muted);font-weight:700">PER COUNTRY: GROUPS</label>
+        <input type="number" min="1" max="26" id="maxCountryGroup" value="${state.settings.maxPerCountryGroup}" style="width:60px" title="Draft + group stage cap">
+        <label style="font-size:12px;color:var(--muted);font-weight:700">FROM R32</label>
+        <input type="number" min="1" max="26" id="maxCountry" value="${state.settings.maxPerCountry}" style="width:60px" title="Knockout-stage cap">
         <label style="font-size:12px;color:var(--muted);font-weight:700;margin-left:10px">PICK TIMER</label>
         <select id="pickTimer">
           ${[0, 30, 45, 60].map(t => `<option value="${t}" ${state.settings.pickTimer === t ? 'selected' : ''}>${t ? t + 's — Moggi picks at zero' : 'Off'}</option>`).join('')}
@@ -852,7 +861,8 @@ function bindSetup() {
     state.settings.quotas[inp.dataset.quota] = Math.max(0, +inp.value || 0);
     updateTotal();
   });
-  $('#maxCountry').oninput = e => { state.settings.maxPerCountry = Math.max(1, +e.target.value || 3); };
+  $('#maxCountry').oninput = e => { state.settings.maxPerCountry = Math.max(1, +e.target.value || 4); };
+  $('#maxCountryGroup').oninput = e => { state.settings.maxPerCountryGroup = Math.max(1, +e.target.value || 1); };
   $('#pickTimer').onchange = e => { state.settings.pickTimer = +e.target.value || 0; };
   updateTotal();
   $('#demoBtn').onclick = enterDemo;
@@ -1523,7 +1533,7 @@ function bindTeam() {
         : '<div class="muted" style="font-size:11.5px;padding:2px 0 6px">Browsing the Trough — choose a player out above to unlock signing.</div>';
       results.innerHTML = hint + pool.slice(0, 20).map(p => {
         const posOk = !outP || p.pos === outP.pos || posCount(mid)[p.pos] < state.settings.quotas[p.pos];
-        const countryOk = countryCount(squadAfterOut, p.team) < state.settings.maxPerCountry;
+        const countryOk = countryCount(squadAfterOut, p.team) < countryCapNow(cur);
         const ok = outP && posOk && countryOk;
         const why = !outP ? 'Pick who goes out first' : !countryOk ? 'Country limit reached' : 'Position quota full';
         return `<div class="lrow"><span class="pos-badge pos-${p.pos}">${p.pos}</span>${flagImg(p.team)} ${esc(p.name)} <span class="muted" style="font-size:11px">${esc(p.team)} · ${rating(p)} pts</span>
@@ -1533,6 +1543,8 @@ function bindTeam() {
         if (!canActFor(mid)) { toast(`That's ${managerName(mid)}'s swap, not yours`); return; }
         if (troughUsed(mid, cur)) { toast('Swap already used this gameweek'); return; }
         const inId = +b.dataset.trin, outId = teamView.transferOut;
+        const inP = PLAYER_BY_ID[inId];
+        if (countryCount(squadAt(mid, cur).filter(x => x.id !== outId), inP.team) >= countryCapNow(cur)) { toast('Country limit reached'); return; }
         state.transfers.push({ managerId: mid, outId, inId, gw: cur, n: state.transfers.length + 1 });
         (state.waivers[cur] = state.waivers[cur] || { actions: [] }).actions.push({ mid, outId, inId });
         const lu = state.lineups[mid]?.[cur];
@@ -1575,7 +1587,7 @@ function bindTeam() {
           const qa = posCount(mid), qb = posCount(other), q = state.settings.quotas;
           if (qa[pb.pos] >= q[pb.pos] || qb[pa.pos] >= q[pa.pos]) { toast('Trade breaks a position quota'); return; }
         }
-        const max = state.settings.maxPerCountry;
+        const max = countryCapNow(cur);
         if (countryCount(squadAt(mid, cur).filter(p => p.id !== a), pb.team) >= max ||
             countryCount(squadAt(other, cur).filter(p => p.id !== b), pa.team) >= max) {
           toast('Trade breaks the country limit'); return;
@@ -1724,7 +1736,7 @@ function viewRules() {
     <div class="card">
       <h2>The basics</h2>
       <p class="rules-p">Four managers. One snake draft over all ${PLAYERS.length} players from the 48 official FIFA squads — order reverses every round.</p>
-      <p class="rules-p">Squads of <b>${state.settings.squadSize}</b>: ${q.GK} GK, ${q.DF} DF, ${q.MF} MF, ${q.FW} FW. Maximum <b>${state.settings.maxPerCountry} players per country</b>.</p>
+      <p class="rules-p">Squads of <b>${state.settings.squadSize}</b>: ${q.GK} GK, ${q.DF} DF, ${q.MF} MF, ${q.FW} FW. Country limit: <b>${state.settings.maxPerCountryGroup} per country through the draft and group stage</b>, rising to <b>${state.settings.maxPerCountry} from the Round of 32</b> (via the Trough and trades). 23 squads from 48 nations — plenty, and funny.</p>
       <h3>Gameweeks</h3>
       ${GAMEWEEKS.map((g, i) => `<div class="score-row"><span>GW${g.n} — ${g.label}</span><span class="muted">${new Date(gwFrom(i)).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' })} – ${new Date(g.to).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' })}</span></div>`).join('')}
     </div>

@@ -28,7 +28,7 @@ const check = (label, ok, detail = '') => {
   // ---------- 2. country limit enforced ----------
   const limitOk = await p.evaluate(() => {
     const mid = currentManagerId();
-    const max = state.settings.maxPerCountry;
+    const max = state.settings.maxPerCountryGroup;
     const france = PLAYERS.filter(pl => pl.team === 'France').slice(0, max + 1);
     // fill to the country limit then test one more via canPick
     state.draft.picks.push(...france.slice(0, max).map((pl, i) => ({ managerId: mid, playerId: pl.id, n: i + 1 })));
@@ -59,7 +59,7 @@ const check = (label, ok, detail = '') => {
       for (const pos of ['GK', 'DF', 'MF', 'FW']) if (c[pos] !== q[pos]) out.quotaOk = false;
       const nat = {};
       sq.forEach(pl => nat[pl.team] = (nat[pl.team] || 0) + 1);
-      if (Object.values(nat).some(n => n > state.settings.maxPerCountry)) out.countryOk = false;
+      if (Object.values(nat).some(n => n > state.settings.maxPerCountryGroup)) out.countryOk = false;
     }
     return out;
   });
@@ -107,7 +107,7 @@ const check = (label, ok, detail = '') => {
         const owned = ownedIdsAt(cur);
         const after = squad.filter(x => x.id !== out.id);
         const cand = PLAYERS.filter(x => !owned.has(x.id) && x.pos === out.pos
-          && countryCount(after, x.team) < state.settings.maxPerCountry)
+          && countryCount(after, x.team) < countryCapNow(cur))
           .sort((a, b) => rating(b) - rating(a))[0];
         if (cand && Math.random() > 0.25) {
           state.transfers.push({ managerId: wmid, outId: out.id, inId: cand.id, gw: cur, n: state.transfers.length + 1 });
@@ -129,7 +129,7 @@ const check = (label, ok, detail = '') => {
         if (managerSquad(m.id).length !== state.settings.squadSize) return false;
         const nat = {};
         managerSquad(m.id).forEach(pl => nat[pl.team] = (nat[pl.team] || 0) + 1);
-        if (Object.values(nat).some(n => n > state.settings.maxPerCountry)) return false;
+        if (Object.values(nat).some(n => n > countryCapNow(currentGwIndex()))) return false;
       }
       return true;
     });
@@ -182,8 +182,8 @@ const check = (label, ok, detail = '') => {
         if (tp.pos !== mp.pos) continue;
         const aAfter = squadAt(mid, cur0).filter(x => x.id !== mp.id);
         const bAfter = squadAt(other, cur0).filter(x => x.id !== tp.id);
-        if (countryCount(aAfter, tp.team) >= state.settings.maxPerCountry) continue;
-        if (countryCount(bAfter, mp.team) >= state.settings.maxPerCountry) continue;
+        if (countryCount(aAfter, tp.team) >= countryCapNow(cur0)) continue;
+        if (countryCount(bAfter, mp.team) >= countryCapNow(cur0)) continue;
         pair = [mo.value, to.value]; break;
       }
       if (pair) break;

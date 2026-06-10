@@ -10,7 +10,7 @@ Private draft fantasy World Cup 2026 game for four managers. A Calciopoli Produc
 - **The Trough**: one swap per manager per gameweek — drop anyone, sign any undrafted player, no queue
 - **Trade desk**: agreed swaps between two managers, any time, doesn't use a Trough swap
 - **Auto-subs**: a starter who never plays is replaced by your best bench player who did (keeps XI shape legal)
-- **Country limit**: max 4 players per nation per squad (configurable at setup)
+- **Country limit**: max 1 per nation through the draft and group stage; rises to 4 from the Round of 32 via the Trough and trades (both configurable at setup)
 - **Pomp**: opening ceremony with draft-order reveal (feat. Coldplay, North London Forever) and two mandatory drinks breaks, dedicated to Iain
 - Live scoring synced from ESPN's public World Cup feed, including in-play (no API key, no accounts)
 - Pure static site — no backend, state lives in the browser (localStorage)
